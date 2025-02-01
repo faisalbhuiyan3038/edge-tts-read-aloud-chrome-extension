@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <select id="voiceSelect">
+      <option value="en-US-AndrewNeural">Andrew (US)</option>
+      <option value="en-US-AriaNeural">Aria (US)</option>
+      <option value="en-US-AvaNeural" selected>Ava (US)</option>
+      <option value="en-US-ChristopherNeural">Christopher (US)</option>
+      <option value="en-US-SteffanNeural">Steffan (US)</option>
+      <option value="en-IE-ConnorNeural">Connor (IE)</option>
+      <option value="en-GB-RyanNeural">Ryan (GB)</option>
+      <option value="en-GB-SoniaNeural">Sonia (GB)</option>
+      <option value="en-AU-NatashaNeural">Natasha (AU)</option>
+      <option value="en-AU-WilliamNeural">William (AU)</option>
+    </select>
+    
+    <div class="speed-control">
+      <label>Speed: <span id="speedValue">1.0x</span></label>
+      <input type="range" id="speedSlider" 
+             min="-2" max="2" step="0.05" value="1">
+    </div>
+    
+    <button id="startReading">Read Page</button>
+    <button id="stopReading">Stop</button>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
