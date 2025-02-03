@@ -7,6 +7,26 @@ class ContentManager {
   private audioChunks: Uint8Array[] = [];
   private isPlaying = false;
 
+  // Add these as class properties
+  private readonly excludeSelectors = [
+    'nav:not([aria-label="Main"])',
+    'header:not([role="banner"])',
+    'footer:not([role="contentinfo"])',
+    'script', 'style', 'noscript', 'iframe',
+    'select', 'textarea', 'button', 'label',
+    'audio', 'video', 'dialog', 'embed',
+    'menu', 'object',
+    '.no-read-aloud',
+    '[aria-hidden="true"]'
+  ].join(',');
+
+  private readonly blockElements = new Set([
+    'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'article', 'section', 'aside', 'blockquote',
+    'li', 'td', 'th', 'dd', 'dt', 'figcaption',
+    'pre', 'address'
+  ]);
+
   constructor() {
     this.setupMessageListener();
   }
@@ -156,93 +176,135 @@ class ContentManager {
   }
 
   private extractPageText(): string {
-    // Try multiple methods to get text content
-    const textContent = this.getTextFromMultipleSources();
-    return this.processText(textContent);
+    const mainContent = this.getMainContent();
+    return mainContent ? this.processContent(mainContent) : '';
   }
 
-  private getTextFromMultipleSources(): string {
-    let content = '';
+  private getMainContent(): Element | null {
+    const mainSelectors = [
+      'main[role="main"]',
+      'article[role="article"]',
+      'div[role="main"]',
+      'main',
+      'article',
+      '#main-content',
+      '.main-content',
+      '.post-content',
+      '.article-content'
+    ];
 
-    // Method 1: Try getting main content first
-    const mainContent = document.querySelector('main, article, #main, #content, .main, .content');
-    if (mainContent) {
-      content = mainContent.textContent || '';
+    // Try to find main content first
+    for (const selector of mainSelectors) {
+      const element = document.querySelector(selector);
+      if (element && this.hasSignificantContent(element)) {
+        return element;
+      }
     }
 
-    // Method 2: If no main content, try getting body excluding navigation and footer
-    if (!content.trim()) {
-      const body = document.body;
-      const elementsToExclude = 'nav, header, footer, script, style, noscript, iframe';
-      const clone = body.cloneNode(true) as HTMLElement;
-
-      // Remove unwanted elements from clone
-      elementsToExclude.split(',').forEach(selector => {
-        clone.querySelectorAll(selector.trim()).forEach(el => el.remove());
-      });
-
-      content = clone.textContent || '';
-    }
-
-    // Method 3: If still no content, try getting visible text nodes
-    if (!content.trim()) {
-      content = this.getVisibleTextNodes(document.body);
-    }
-
-    // Method 4: Last resort - get all body text
-    if (!content.trim()) {
-      content = document.body.innerText || document.body.textContent || '';
-    }
-
-    return content;
+    // Fallback to body
+    const body = document.body.cloneNode(true) as HTMLElement;
+    body.querySelectorAll(this.excludeSelectors).forEach(el => el.remove());
+    return body;
   }
 
-  private getVisibleTextNodes(node: Node): string {
-    let text = '';
-    const walk = document.createTreeWalker(
-      node,
+  private hasSignificantContent(element: Element): boolean {
+    const text = element.textContent || '';
+    return text.trim().length > 100;
+  }
+
+  private processContent(element: Element): string {
+    const textBlocks: string[] = [];
+    let currentBlock = '';
+    let lastElement: Element | null = null;
+
+    const walker = document.createTreeWalker(
+      element,
       NodeFilter.SHOW_TEXT,
       {
-        acceptNode: function(node) {
-          // Check if the text node is visible
-          const element = node.parentElement;
-          if (!element) return NodeFilter.FILTER_REJECT;
+        acceptNode: (node) => {
+          const parent = node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
 
-          const style = window.getComputedStyle(element);
+          const style = window.getComputedStyle(parent);
           const isVisible = style.display !== 'none' &&
-                           style.visibility !== 'hidden' &&
-                           style.opacity !== '0';
+                          style.visibility !== 'hidden' &&
+                          style.opacity !== '0' &&
+                          node.textContent!.trim().length > 0;
 
           return isVisible ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
         }
       }
     );
 
-    let currentNode;
-    while (currentNode = walk.nextNode()) {
-      text += currentNode.textContent + ' ';
+    let node: Node | null;
+    while (node = walker.nextNode()) {
+      const parent = node.parentElement!;
+      let text = this.cleanText(node.textContent || '');
+      if (!text) continue;
+
+      // Handle block-level elements
+      if (lastElement &&
+          parent !== lastElement &&
+          (this.blockElements.has(parent.tagName.toLowerCase()) ||
+           this.blockElements.has(lastElement.tagName.toLowerCase()))) {
+        if (currentBlock) {
+          textBlocks.push(this.finalizeBlock(currentBlock));
+          currentBlock = '';
+        }
+      }
+
+      // Special handling for list items
+      if (parent.tagName === 'LI') {
+        if (currentBlock) textBlocks.push(this.finalizeBlock(currentBlock));
+        currentBlock = '• ' + text;
+      } else {
+        // Add appropriate spacing
+        if (currentBlock && !currentBlock.endsWith(' ')) {
+          currentBlock += ' ';
+        }
+        currentBlock += text;
+      }
+
+      lastElement = parent;
     }
 
-    return text;
+    if (currentBlock) {
+      textBlocks.push(this.finalizeBlock(currentBlock));
+    }
+
+    return this.finalizeText(textBlocks.join('\n\n'));
   }
 
-  private processText(text: string): string {
+  private cleanText(text: string): string {
     return text
-      // Remove extra whitespace
       .replace(/\s+/g, ' ')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')  // Remove zero-width spaces
+      .trim();
+  }
+
+  private finalizeBlock(text: string): string {
+    return text
+      // Ensure proper spacing around punctuation
+      .replace(/\s*([.,!?:;])\s*/g, '$1 ')
+      // Fix multiple spaces
+      .replace(/\s+/g, ' ')
+      // Ensure sentence-ending punctuation
+      .replace(/([a-zA-Z0-9])\s*$/g, '$1.')
+      .trim();
+  }
+
+  private finalizeText(text: string): string {
+    return text
+      // Clean up URLs and email addresses
+      .replace(/https?:\/\/[^\s]+/g, '')
+      .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '')
       // Remove common unwanted elements
       .replace(/^(Cookie Policy|Accept Cookies|Privacy Policy|Terms of Service)$/gm, '')
-      // Remove URLs
-      .replace(/https?:\/\/[^\s]+/g, '')
-      // Remove email addresses
-      .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '')
-      // Remove special characters
-      .replace(/[^\w\s.,!?-]/g, ' ')
-      // Split into sentences and filter empty ones
-      .split(/[.!?]+/)
-      .filter(sentence => sentence.trim().length > 0)
-      // Join sentences back together
-      .join('. ')
+      // Fix redundant periods and spacing
+      .replace(/\.+/g, '.')
+      .replace(/\.\s*\./g, '.')
+      // Ensure proper paragraph breaks
+      .replace(/\n\s*\n/g, '\n\n')
       .trim();
   }
 }
