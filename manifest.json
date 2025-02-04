@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Edge TTS Reader",
   "version": "1.0",
-  "description": "Text-to-speech using Edge TTS API",
+  "description": "Text-to-speech using Edge TTS API with reader mode",
   "host_permissions": [
     "https://speech.platform.bing.com/*",
     "wss://speech.platform.bing.com/*"
@@ -11,7 +11,8 @@
     "activeTab",
     "storage",
     "scripting",
-    "contextMenus"
+    "contextMenus",
+    "tabs"
   ],
   "action": {
     "default_popup": "popup/popup.html"
@@ -27,6 +28,19 @@
       ],
       "js": [
         "content/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "reader/reader.html",
+        "reader/reader.js",
+        "reader/reader.css"
+      ],
+      "matches": [
+        "<all_urls>"
       ]
     }
   ],

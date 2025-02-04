@@ -1,4 +1,36 @@
 import { EdgeTTSClient, ProsodyOptions, OUTPUT_FORMAT } from 'edge-tts-client';
+import { Readability } from '@mozilla/readability';
+import { EventEmitter } from 'events';
+
+interface Sentence {
+  text: string;
+  index: number;
+  isHeading?: boolean;
+}
+
+interface ParsedArticle {
+  title: string;
+  content: string;
+  textContent: string;
+  length: number;
+  excerpt: string;
+  byline: string;
+  dir: string;
+  siteName: string;
+  lang: string;
+}
+
+interface TTSEventMap {
+  data: (chunk: Uint8Array) => void;
+  end: () => void;
+  error: (error: Error) => void;
+}
+
+interface TTSStream {
+  on(event: 'data', listener: (chunk: Uint8Array) => void): this;
+  on(event: 'end', listener: () => void): this;
+  on(event: 'error', listener: (error: Error) => void): this;
+}
 
 class ContentManager {
   private ttsClient: EdgeTTSClient | null = null;
@@ -6,23 +38,25 @@ class ContentManager {
   private sourceNode: AudioBufferSourceNode | null = null;
   private audioChunks: Uint8Array[] = [];
   private isPlaying = false;
+  private isPaused = false;
+  private currentSentenceIndex = 0;
+  private sentences: Sentence[] = [];
+  private currentStream: TTSStream | null = null;
 
-  // Add these as class properties
   private readonly excludeSelectors = [
-    'nav:not([aria-label="Main"])',
-    'header:not([role="banner"])',
-    'footer:not([role="contentinfo"])',
-    'script', 'style', 'noscript', 'iframe',
-    'select', 'textarea', 'button', 'label',
-    'audio', 'video', 'dialog', 'embed',
-    'menu', 'object',
-    '.no-read-aloud',
-    '[aria-hidden="true"]'
+    'select', 'textarea', 'button', 'label', 'audio', 'video',
+    'dialog', 'embed', 'menu', 'nav:not([role="main"])',
+    'noframes', 'noscript', 'object', 'script', 'style', 'svg',
+    'aside', 'footer', '#footer', '.no-read-aloud',
+    '[aria-hidden="true"]', '[role="complementary"]',
+    'sup',
+    '[style*="float: right"]',
+    '[style*="position: fixed"]'
   ].join(',');
 
   private readonly blockElements = new Set([
     'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-    'article', 'section', 'aside', 'blockquote',
+    'article', 'section', 'blockquote',
     'li', 'td', 'th', 'dd', 'dt', 'figcaption',
     'pre', 'address'
   ]);
@@ -33,38 +67,137 @@ class ContentManager {
 
   private setupMessageListener() {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      console.log('Content script received message:', message);
+
       switch (message.action) {
         case 'startReading':
-          this.startReading(
-            this.extractPageText(),
-            message.voice,
-            message.speed
-          );
-          sendResponse({ status: 'started' }); // Immediately respond
+          this.startReading(message.voice, message.speed)
+            .then(() => sendResponse({ status: 'success' }))
+            .catch(error => {
+              console.error('Start reading error:', error);
+              sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+            });
           break;
 
         case 'readSelection':
-          this.startReading(
-            message.text,
-            undefined,
-            undefined
-          );
-          sendResponse({ status: 'started' });
+          const selection = window.getSelection()?.toString().trim();
+          if (selection) {
+            this.startReadingText(selection, undefined, undefined)
+              .then(() => sendResponse({ status: 'success' }))
+              .catch(error => {
+                console.error('Read selection error:', error);
+                sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+              });
+          } else {
+            sendResponse({ status: 'error', error: 'No text selected' });
+          }
           break;
 
         case 'stopReading':
           this.stopReading();
-          sendResponse({ status: 'stopped' });
+          sendResponse({ status: 'success' });
+          break;
+
+        case 'pauseReading':
+          this.pauseReading();
+          sendResponse({ status: 'success' });
+          break;
+
+        case 'resumeReading':
+          this.resumeReading()
+            .then(() => sendResponse({ status: 'success' }))
+            .catch(error => {
+              console.error('Resume reading error:', error);
+              sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+            });
           break;
       }
+
+      return true; // Keep the message channel open for async response
     });
   }
 
-  private async startReading(text: string, voice?: string, speed?: number) {
+  private async startReading(voice?: string, speed?: number) {
     try {
       // Stop any existing playback
       this.stopReading();
 
+      // Parse the page content using Readability
+      const article = this.parsePageContent();
+      if (!article) {
+        throw new Error('Could not parse page content');
+      }
+
+      // Format the content for the reader
+      const formattedContent = this.formatArticleContent(article);
+
+      // Open reader tab with the parsed text
+      const response = await chrome.runtime.sendMessage({
+        action: 'openReader',
+        text: formattedContent,
+        title: article.title,
+        metadata: {
+          author: article.byline,
+          siteName: article.siteName,
+          excerpt: article.excerpt
+        }
+      });
+
+      if (response?.status === 'error') {
+        throw new Error(response.error);
+      }
+
+      // Start reading the text
+      await this.startReadingText(article.textContent, voice, speed);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
+      console.error('Failed to start reading:', errorMessage);
+      // Notify the reader about the error
+      chrome.runtime.sendMessage({
+        action: 'updateReaderContent',
+        error: errorMessage
+      });
+    }
+  }
+
+  private parsePageContent(): ParsedArticle | null {
+    // Clone the document to avoid modifying the original
+    const documentClone = document.cloneNode(true) as Document;
+
+    // Create new readability object
+    const reader = new Readability(documentClone, {
+      keepClasses: true,
+      classesToPreserve: ['chapter', 'article', 'section', 'title']
+    });
+
+    // Parse the content
+    return reader.parse();
+  }
+
+  private formatArticleContent(article: ParsedArticle): string {
+    let content = '';
+
+    // Add title
+    if (article.title) {
+      content += `<h1>${article.title}</h1>\n\n`;
+    }
+
+    // Add metadata
+    if (article.byline || article.siteName) {
+      content += '<div class="article-metadata">\n';
+      if (article.byline) content += `<p class="author">By ${article.byline}</p>\n`;
+      if (article.siteName) content += `<p class="site-name">From ${article.siteName}</p>\n`;
+      content += '</div>\n\n';
+    }
+
+    // Add main content
+    content += article.content;
+
+    return content;
+  }
+
+  private async startReadingText(text: string, voice?: string, speed?: number) {
+    try {
       // Get settings if not provided
       if (!voice || !speed) {
         const settings = await this.getSettings();
@@ -72,240 +205,266 @@ class ContentManager {
         speed = speed || settings.speed;
       }
 
-      this.ttsClient = new EdgeTTSClient();
-      await this.ttsClient.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+      // Split text into sentences
+      this.sentences = this.splitIntoSentences(text);
+      this.currentSentenceIndex = 0;
+      this.isPaused = false;
 
-      const options = new ProsodyOptions();
-      options.rate = speed;
-      
-      // Initialize audio context
-      this.audioContext = new AudioContext();
-      this.audioChunks = [];
-      
-      const stream = this.ttsClient.toStream(text, options);
-
-      stream.on('data', async (chunk) => {
-        this.audioChunks.push(chunk);
-        if (!this.isPlaying) {
-          this.isPlaying = true;
-          await this.playNextChunk();
-        }
-      });
-
-      stream.on('end', () => {
-        this.ttsClient = null;
-      });
-
+      // Start reading sentences
+      await this.readNextSentence(voice, speed);
     } catch (error) {
       console.error('TTS Error:', error);
       this.isPlaying = false;
+      throw error;
     }
   }
 
-  private async playNextChunk() {
-    if (!this.isPlaying || !this.audioContext || this.audioChunks.length === 0) {
-      this.isPlaying = false;
+  private splitIntoSentences(text: string): Sentence[] {
+    // Remove extra whitespace and normalize line endings
+    text = text.replace(/\s+/g, ' ')
+      .replace(/([.!?])\s+/g, '$1\n')
+      .trim();
+
+    // Split into sentences
+    const sentences = text.split(/\n+/);
+
+    return sentences.map((text, index) => {
+      const trimmedText = text.trim();
+      return {
+        text: trimmedText,
+        index,
+        isHeading: this.isHeading(trimmedText)
+      };
+    }).filter(sentence => sentence.text.length > 0);
+  }
+
+  private isHeading(text: string): boolean {
+    // Check if the text looks like a heading
+    return (
+      // All caps with no lowercase
+      /^[A-Z0-9\s.,!?-]+$/.test(text) ||
+      // Short phrase ending with colon
+      /^.{1,50}:$/.test(text) ||
+      // Numbered heading
+      /^\d+\.\s+.{1,50}$/.test(text)
+    );
+  }
+
+  private async readNextSentence(voice: string, speed: number) {
+    if (this.isPaused || this.currentSentenceIndex >= this.sentences.length) {
+      if (this.currentSentenceIndex >= this.sentences.length) {
+        this.stopReading();
+      }
       return;
     }
 
-    try {
-      // Combine chunks into one array
-      const combinedChunks = new Uint8Array(
-        this.audioChunks.reduce((acc, chunk) => acc + chunk.length, 0)
-      );
-      
-      let offset = 0;
-      this.audioChunks.forEach(chunk => {
-        combinedChunks.set(chunk, offset);
-        offset += chunk.length;
-      });
-      
-      this.audioChunks = [];
+    const sentence = this.sentences[this.currentSentenceIndex];
 
-      const audioBuffer = await this.audioContext.decodeAudioData(combinedChunks.buffer);
-      
-      this.sourceNode = this.audioContext.createBufferSource();
-      this.sourceNode.buffer = audioBuffer;
-      this.sourceNode.connect(this.audioContext.destination);
-      
-      this.sourceNode.onended = () => {
-        if (this.audioChunks.length > 0) {
-          this.playNextChunk();
-        } else {
-          this.isPlaying = false;
-        }
-      };
-      
-      this.sourceNode.start();
-    } catch (error) {
-      console.error('Audio playback error:', error);
-      this.isPlaying = false;
+    try {
+      // Update reader highlight
+      await chrome.runtime.sendMessage({
+        action: 'updateReaderHighlight',
+        index: this.currentSentenceIndex,
+        text: sentence.text
+      });
+
+      // Read the sentence
+      await this.readSentence(sentence.text, voice, speed);
+
+      // Move to next sentence
+      this.currentSentenceIndex++;
+      await this.readNextSentence(voice, speed);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
+      console.error('Error reading sentence:', errorMessage);
+      this.stopReading();
     }
   }
 
-  private async getSettings(): Promise<{ voice: string; speed: number }> {
-    return new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: 'getSettings' }, (response) => {
-        resolve(response || { voice: 'en-US-AvaNeural', speed: 1.0 });
-      });
+  private async readSentence(text: string, voice: string, speed: number): Promise<void> {
+    return new Promise(async (resolve, reject) => {
+      try {
+        if (!this.ttsClient) {
+          console.log('Creating new TTS client');
+          this.ttsClient = new EdgeTTSClient();
+        }
+
+        // Initialize audio context if needed
+        if (!this.audioContext) {
+          console.log('Creating new AudioContext');
+          this.audioContext = new AudioContext();
+        }
+
+        const audioContext = this.audioContext;
+        if (!audioContext) {
+          throw new Error('Failed to create audio context');
+        }
+
+        // Make sure audio context is running
+        if (audioContext.state !== 'running') {
+          console.log('Resuming audio context');
+          await audioContext.resume();
+        }
+
+        console.log('Setting TTS metadata:', { voice, format: OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3 });
+        await this.ttsClient.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+
+        const options = new ProsodyOptions();
+        options.rate = speed;
+        console.log('TTS options:', options);
+
+        // Clear any existing audio chunks
+        this.audioChunks = [];
+        this.isPlaying = true;
+
+        // Collect all chunks before playing
+        const allChunks: Uint8Array[] = [];
+
+        console.log('Starting TTS stream for text:', text);
+        const stream = this.ttsClient.toStream(text, options);
+        console.log('Stream created:', stream);
+
+        if (!stream || typeof stream.on !== 'function') {
+          throw new Error('Invalid stream object');
+        }
+
+        // Set up event handlers
+        stream.on('data', (chunk: Uint8Array) => {
+          console.log('Received audio chunk:', chunk.length, 'bytes');
+          allChunks.push(chunk);
+        });
+
+        stream.on('end', async () => {
+          console.log('Stream ended, total chunks:', allChunks.length);
+          if (allChunks.length === 0) {
+            console.error('Stream ended without receiving any data');
+            reject(new Error('No audio data received'));
+            return;
+          }
+
+          try {
+            // Combine all chunks into one buffer
+            const totalLength = allChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+            const combinedBuffer = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of allChunks) {
+              combinedBuffer.set(chunk, offset);
+              offset += chunk.length;
+            }
+
+            // Create audio buffer
+            const audioBuffer = await audioContext.decodeAudioData(combinedBuffer.buffer);
+            console.log('Audio buffer created:', { duration: audioBuffer.duration, channels: audioBuffer.numberOfChannels });
+
+            if (this.isPaused) {
+              console.log('Playback paused, skipping audio');
+              resolve();
+              return;
+            }
+
+            // Create and connect source node
+            const sourceNode = audioContext.createBufferSource();
+            sourceNode.buffer = audioBuffer;
+            sourceNode.connect(audioContext.destination);
+
+            // Store the source node
+            this.sourceNode = sourceNode;
+
+            // When audio ends, resolve the promise
+            sourceNode.onended = () => {
+              console.log('Audio finished playing');
+              this.sourceNode = null;
+              resolve();
+            };
+
+            // Start playing
+            sourceNode.start();
+            console.log('Started playing audio');
+          } catch (error) {
+            console.error('Audio playback error:', error);
+            reject(error);
+          }
+        });
+
+      } catch (error) {
+        console.error('Error reading sentence:', error);
+        reject(error instanceof Error ? error : new Error('Unknown error'));
+      }
     });
   }
 
-  private stopReading() {
+  private async resumeReading() {
+    console.log('Resuming playback');
+    this.isPaused = false;
+    const settings = await this.getSettings();
+    await this.readNextSentence(settings.voice, settings.speed);
+  }
+
+  private pauseReading() {
+    console.log('Pausing playback');
+    this.isPaused = true;
+
+    // Stop current audio
     if (this.sourceNode) {
       try {
         this.sourceNode.stop();
+        this.sourceNode.disconnect();
       } catch (e) {
         // Ignore errors if already stopped
       }
       this.sourceNode = null;
     }
-    
+
+    // Clear any pending audio
+    this.audioChunks = [];
+  }
+
+  private async getSettings(): Promise<{ voice: string; speed: number }> {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ action: 'getSettings' }, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(chrome.runtime.lastError);
+        } else {
+          resolve(response || { voice: 'en-US-AvaNeural', speed: 1.0 });
+        }
+      });
+    });
+  }
+
+  private stopReading() {
+    console.log('Stopping playback');
+    this.isPaused = false;
+    this.currentSentenceIndex = 0;
+    this.isPlaying = false;
+
+    // Stop current audio
+    if (this.sourceNode) {
+      try {
+        this.sourceNode.stop();
+        this.sourceNode.disconnect();
+      } catch (e) {
+        // Ignore errors if already stopped
+      }
+      this.sourceNode = null;
+    }
+
+    // Clear audio context
     if (this.audioContext) {
-      this.audioContext.close();
+      this.audioContext.close().catch(console.error);
       this.audioContext = null;
     }
-    
+
+    // Clear TTS client
     if (this.ttsClient) {
       this.ttsClient.close();
       this.ttsClient = null;
     }
-    
+
+    // Clear any pending audio
     this.audioChunks = [];
-    this.isPlaying = false;
-  }
 
-  private extractPageText(): string {
-    const mainContent = this.getMainContent();
-    return mainContent ? this.processContent(mainContent) : '';
-  }
-
-  private getMainContent(): Element | null {
-    const mainSelectors = [
-      'main[role="main"]',
-      'article[role="article"]',
-      'div[role="main"]',
-      'main',
-      'article',
-      '#main-content',
-      '.main-content',
-      '.post-content',
-      '.article-content'
-    ];
-
-    // Try to find main content first
-    for (const selector of mainSelectors) {
-      const element = document.querySelector(selector);
-      if (element && this.hasSignificantContent(element)) {
-        return element;
-      }
-    }
-
-    // Fallback to body
-    const body = document.body.cloneNode(true) as HTMLElement;
-    body.querySelectorAll(this.excludeSelectors).forEach(el => el.remove());
-    return body;
-  }
-
-  private hasSignificantContent(element: Element): boolean {
-    const text = element.textContent || '';
-    return text.trim().length > 100;
-  }
-
-  private processContent(element: Element): string {
-    const textBlocks: string[] = [];
-    let currentBlock = '';
-    let lastElement: Element | null = null;
-
-    const walker = document.createTreeWalker(
-      element,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode: (node) => {
-          const parent = node.parentElement;
-          if (!parent) return NodeFilter.FILTER_REJECT;
-
-          const style = window.getComputedStyle(parent);
-          const isVisible = style.display !== 'none' &&
-                          style.visibility !== 'hidden' &&
-                          style.opacity !== '0' &&
-                          node.textContent!.trim().length > 0;
-
-          return isVisible ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-        }
-      }
-    );
-
-    let node: Node | null;
-    while (node = walker.nextNode()) {
-      const parent = node.parentElement!;
-      let text = this.cleanText(node.textContent || '');
-      if (!text) continue;
-
-      // Handle block-level elements
-      if (lastElement &&
-          parent !== lastElement &&
-          (this.blockElements.has(parent.tagName.toLowerCase()) ||
-           this.blockElements.has(lastElement.tagName.toLowerCase()))) {
-        if (currentBlock) {
-          textBlocks.push(this.finalizeBlock(currentBlock));
-          currentBlock = '';
-        }
-      }
-
-      // Special handling for list items
-      if (parent.tagName === 'LI') {
-        if (currentBlock) textBlocks.push(this.finalizeBlock(currentBlock));
-        currentBlock = '• ' + text;
-      } else {
-        // Add appropriate spacing
-        if (currentBlock && !currentBlock.endsWith(' ')) {
-          currentBlock += ' ';
-        }
-        currentBlock += text;
-      }
-
-      lastElement = parent;
-    }
-
-    if (currentBlock) {
-      textBlocks.push(this.finalizeBlock(currentBlock));
-    }
-
-    return this.finalizeText(textBlocks.join('\n\n'));
-  }
-
-  private cleanText(text: string): string {
-    return text
-      .replace(/\s+/g, ' ')
-      .replace(/[\u200B-\u200D\uFEFF]/g, '')  // Remove zero-width spaces
-      .trim();
-  }
-
-  private finalizeBlock(text: string): string {
-    return text
-      // Ensure proper spacing around punctuation
-      .replace(/\s*([.,!?:;])\s*/g, '$1 ')
-      // Fix multiple spaces
-      .replace(/\s+/g, ' ')
-      // Ensure sentence-ending punctuation
-      .replace(/([a-zA-Z0-9])\s*$/g, '$1.')
-      .trim();
-  }
-
-  private finalizeText(text: string): string {
-    return text
-      // Clean up URLs and email addresses
-      .replace(/https?:\/\/[^\s]+/g, '')
-      .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '')
-      // Remove common unwanted elements
-      .replace(/^(Cookie Policy|Accept Cookies|Privacy Policy|Terms of Service)$/gm, '')
-      // Fix redundant periods and spacing
-      .replace(/\.+/g, '.')
-      .replace(/\.\s*\./g, '.')
-      // Ensure proper paragraph breaks
-      .replace(/\n\s*\n/g, '\n\n')
-      .trim();
+    // Notify the reader that reading has stopped
+    chrome.runtime.sendMessage({ action: 'readingStopped' }).catch(console.error);
   }
 }
 
