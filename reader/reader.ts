@@ -26,6 +26,7 @@ class ReaderManager {
 
     this.setupMessageListener();
     this.setupControlButtons();
+    this.setupEventListeners();
   }
 
   private setupMessageListener() {
@@ -39,7 +40,7 @@ class ReaderManager {
             sendResponse({ status: 'success' });
             break;
           case 'highlightSentence':
-            this.highlightSentence(message.index);
+            this.highlightSentence(message.index, message.text);
             sendResponse({ status: 'success' });
             break;
           case 'readingStarted':
@@ -85,55 +86,131 @@ class ReaderManager {
     });
   }
 
+  private setupEventListeners() {
+    // Add click handler for sentences
+    this.content.addEventListener('click', (event) => {
+      const target = event.target as HTMLElement;
+      const sentence = target.closest('[data-sentence-index]');
+      if (sentence) {
+        const index = parseInt(sentence.getAttribute('data-sentence-index') || '-1', 10);
+        if (index >= 0) {
+          console.log('Clicked sentence index:', index);
+          // Enable controls when starting to read from new index
+          this.enableControls();
+          chrome.runtime.sendMessage({
+            action: 'readFromIndex',
+            index: index
+          }).catch(error => {
+            console.error('Failed to start reading from index:', error);
+            this.showError('Failed to start reading from selected sentence');
+            this.disableControls();
+          });
+        }
+      }
+    });
+  }
+
   private updateContent(content: string, title?: string, metadata?: ReaderMetadata) {
     // Update title
     this.title.textContent = title || 'Reader View';
 
     // Update metadata
+    let metadataHtml = '';
     if (metadata) {
-      let metadataHtml = '';
       if (metadata.author) {
-        metadataHtml += `<span class="author">By ${metadata.author}</span>`;
+        metadataHtml += `<p class="author">By ${metadata.author}</p>`;
       }
       if (metadata.siteName) {
-        metadataHtml += metadataHtml ? ' • ' : '';
-        metadataHtml += `<span class="site-name">${metadata.siteName}</span>`;
+        metadataHtml += `<p class="site-name">From ${metadata.siteName}</p>`;
       }
       if (metadata.excerpt) {
         metadataHtml += `<p class="excerpt">${metadata.excerpt}</p>`;
       }
-      this.metadata.innerHTML = metadataHtml;
     }
+    this.metadata.innerHTML = metadataHtml;
 
-    // Update content
+    // First, set the content to preserve HTML structure
     this.content.innerHTML = content;
 
-    // Reset error message
+    // Add click handler style
+    if (!document.querySelector('#sentence-styles')) {
+      const style = document.createElement('style');
+      style.id = 'sentence-styles';
+      style.textContent = `
+        [data-sentence-index] {
+          cursor: pointer;
+          transition: background-color 0.2s;
+        }
+        [data-sentence-index]:hover {
+          background-color: rgba(0, 0, 0, 0.05);
+        }
+        [data-sentence-index].active {
+          background-color: #e3f2fd;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    // Now wrap text in clickable elements while preserving HTML
+    let sentenceIndex = 0;
+    const textNodes = [];
+    const walk = document.createTreeWalker(
+      this.content,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode: function (node) {
+          // Skip script and style contents
+          if (node.parentElement?.tagName === 'SCRIPT' ||
+            node.parentElement?.tagName === 'STYLE') {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+
+    let node;
+    while (node = walk.nextNode()) {
+      textNodes.push(node);
+    }
+
+    textNodes.forEach(textNode => {
+      const text = textNode.textContent || '';
+      const sentences = text.split(/(?<=[.!?])\s+/);
+      if (sentences.length > 0 && textNode.parentNode) {
+        const fragment = document.createDocumentFragment();
+        sentences.forEach(sentence => {
+          if (sentence.trim()) {
+            const span = document.createElement('span');
+            span.setAttribute('data-sentence-index', sentenceIndex.toString());
+            span.textContent = sentence + ' ';
+            fragment.appendChild(span);
+            sentenceIndex++;
+          }
+        });
+        textNode.parentNode.replaceChild(fragment, textNode);
+      }
+    });
+
+    // Hide error message
     this.hideError();
 
-    // Enable controls after content is loaded
+    // Enable controls
     this.enableControls();
   }
 
-  private highlightSentence(index: number) {
+  private highlightSentence(index: number, text: string) {
     // Remove previous highlight
-    if (this.currentHighlight) {
-      this.currentHighlight.classList.remove('highlight');
+    const previousHighlight = this.content.querySelector('[data-sentence-index].active');
+    if (previousHighlight) {
+      previousHighlight.classList.remove('active');
     }
 
-    // Find and highlight the new sentence
-    const sentences = Array.from(this.content.querySelectorAll('p, h1, h2, h3, h4, h5, h6')) as HTMLElement[];
-    const sentence = sentences[index];
+    // Add new highlight
+    const sentence = this.content.querySelector(`[data-sentence-index="${index}"]`);
     if (sentence) {
-      sentence.classList.add('highlight');
-      this.currentHighlight = sentence;
-
-      // Scroll the sentence into view
-      sentence.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
-        inline: 'nearest'
-      });
+      sentence.classList.add('active');
+      sentence.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }
 
