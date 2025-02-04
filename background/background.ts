@@ -1,5 +1,6 @@
 class BackgroundManager {
   private readerTabId: number | null = null;
+  private sourceTabId: number | null = null;
 
   constructor() {
     this.setupMessageListener();
@@ -13,44 +14,61 @@ class BackgroundManager {
 
       try {
         switch (message.action) {
+          case 'setSourceTab':
+            this.sourceTabId = message.tabId;
+            sendResponse({ status: 'success' });
+            break;
+
           case 'openReader':
+            // Store the sender tab as the source tab
+            if (sender.tab?.id) {
+              this.sourceTabId = sender.tab.id;
+            }
             this.openReaderTab(message.text, message.title, message.metadata)
               .then(() => sendResponse({ status: 'success' }))
               .catch(error => sendResponse({ status: 'error', error: error.message }));
             break;
 
           case 'readSelection':
-            this.sendMessageToActiveTab({ action: 'readSelection' })
-              .then(() => sendResponse({ status: 'success' }))
-              .catch(error => sendResponse({ status: 'error', error: error.message }));
+            if (this.sourceTabId) {
+              this.sendMessageToTab(this.sourceTabId, { action: 'readSelection' })
+                .then(() => sendResponse({ status: 'success' }))
+                .catch(error => sendResponse({ status: 'error', error: error.message }));
+            }
             break;
 
           case 'stopReading':
-            this.sendMessageToActiveTab({ action: 'stopReading' })
-              .then(() => sendResponse({ status: 'success' }))
-              .catch(error => sendResponse({ status: 'error', error: error.message }));
+            if (this.sourceTabId) {
+              this.sendMessageToTab(this.sourceTabId, { action: 'stopReading' })
+                .then(() => sendResponse({ status: 'success' }))
+                .catch(error => sendResponse({ status: 'error', error: error.message }));
+            }
             break;
 
           case 'pauseReading':
-            this.sendMessageToActiveTab({ action: 'pauseReading' })
-              .then(() => sendResponse({ status: 'success' }))
-              .catch(error => sendResponse({ status: 'error', error: error.message }));
+            if (this.sourceTabId) {
+              this.sendMessageToTab(this.sourceTabId, { action: 'pauseReading' })
+                .then(() => sendResponse({ status: 'success' }))
+                .catch(error => sendResponse({ status: 'error', error: error.message }));
+            }
             break;
 
           case 'resumeReading':
-            this.sendMessageToActiveTab({ action: 'resumeReading' })
-              .then(() => sendResponse({ status: 'success' }))
-              .catch(error => sendResponse({ status: 'error', error: error.message }));
+            if (this.sourceTabId) {
+              this.sendMessageToTab(this.sourceTabId, { action: 'resumeReading' })
+                .then(() => sendResponse({ status: 'success' }))
+                .catch(error => sendResponse({ status: 'error', error: error.message }));
+            }
             break;
 
-          case 'getSettings':
-            chrome.storage.sync.get({
-              voice: 'en-US-AvaNeural',
-              speed: 1.0
-            }, (settings) => {
-              console.log('Sending settings:', settings);
-              sendResponse(settings);
-            });
+          case 'readingStopped':
+            // Close the reader tab
+            if (this.readerTabId) {
+              chrome.tabs.remove(this.readerTabId).catch(console.error);
+              this.readerTabId = null;
+            }
+            this.sourceTabId = null;
+            sendResponse({ status: 'success' });
             break;
 
           case 'updateReaderHighlight':
@@ -61,9 +79,17 @@ class BackgroundManager {
                 text: message.text
               }).then(() => sendResponse({ status: 'success' }))
                 .catch(error => sendResponse({ status: 'error', error: error.message }));
-            } else {
-              sendResponse({ status: 'error', error: 'Reader tab not found' });
             }
+            break;
+
+          case 'getSettings':
+            chrome.storage.sync.get({
+              voice: 'Microsoft Server Speech Text to Speech Voice (en-US, AvaNeural)',
+              speed: 1.0
+            }, (settings) => {
+              console.log('Sending settings:', settings);
+              sendResponse(settings);
+            });
             break;
 
           default:

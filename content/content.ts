@@ -42,6 +42,8 @@ class ContentManager {
   private currentSentenceIndex = 0;
   private sentences: Sentence[] = [];
   private currentStream: TTSStream | null = null;
+  private currentVoice: string | null = null;
+  private currentSpeed: number | null = null;
 
   private readonly excludeSelectors = [
     'select', 'textarea', 'button', 'label', 'audio', 'video',
@@ -69,48 +71,64 @@ class ContentManager {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.log('Content script received message:', message);
 
-      switch (message.action) {
-        case 'startReading':
-          this.startReading(message.voice, message.speed)
-            .then(() => sendResponse({ status: 'success' }))
-            .catch(error => {
-              console.error('Start reading error:', error);
-              sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
-            });
-          break;
-
-        case 'readSelection':
-          const selection = window.getSelection()?.toString().trim();
-          if (selection) {
-            this.startReadingText(selection, undefined, undefined)
+      try {
+        switch (message.action) {
+          case 'startReading':
+            this.startReading(message.voice, message.speed)
               .then(() => sendResponse({ status: 'success' }))
               .catch(error => {
-                console.error('Read selection error:', error);
+                console.error('Start reading error:', error);
                 sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
               });
-          } else {
-            sendResponse({ status: 'error', error: 'No text selected' });
-          }
-          break;
+            break;
 
-        case 'stopReading':
-          this.stopReading();
-          sendResponse({ status: 'success' });
-          break;
+          case 'readSelection':
+            const selection = window.getSelection()?.toString().trim();
+            if (selection) {
+              this.startReadingText(selection, undefined, undefined)
+                .then(() => sendResponse({ status: 'success' }))
+                .catch(error => {
+                  console.error('Read selection error:', error);
+                  sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+                });
+            } else {
+              sendResponse({ status: 'error', error: 'No text selected' });
+            }
+            break;
 
-        case 'pauseReading':
-          this.pauseReading();
-          sendResponse({ status: 'success' });
-          break;
+          case 'stopReading':
+            try {
+              this.stopReading();
+              this.currentSentenceIndex = 0; // Reset to beginning
+              sendResponse({ status: 'success' });
+            } catch (error) {
+              console.error('Stop reading error:', error);
+              sendResponse({ status: 'error', error: 'Failed to stop reading' });
+            }
+            break;
 
-        case 'resumeReading':
-          this.resumeReading()
-            .then(() => sendResponse({ status: 'success' }))
-            .catch(error => {
-              console.error('Resume reading error:', error);
-              sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
-            });
-          break;
+          case 'pauseReading':
+            try {
+              this.pauseReading();
+              sendResponse({ status: 'success' });
+            } catch (error) {
+              console.error('Pause reading error:', error);
+              sendResponse({ status: 'error', error: 'Failed to pause reading' });
+            }
+            break;
+
+          case 'resumeReading':
+            this.resumeReading()
+              .then(() => sendResponse({ status: 'success' }))
+              .catch(error => {
+                console.error('Resume reading error:', error);
+                sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+              });
+            break;
+        }
+      } catch (error) {
+        console.error('Message handling error:', error);
+        sendResponse({ status: 'error', error: 'Failed to process message' });
       }
 
       return true; // Keep the message channel open for async response
@@ -157,6 +175,7 @@ class ContentManager {
         action: 'updateReaderContent',
         error: errorMessage
       });
+      throw new Error(errorMessage);
     }
   }
 
@@ -201,8 +220,11 @@ class ContentManager {
       // Get settings if not provided
       if (!voice || !speed) {
         const settings = await this.getSettings();
-        voice = voice || settings.voice;
-        speed = speed || settings.speed;
+        this.currentVoice = voice || settings.voice;
+        this.currentSpeed = speed || settings.speed;
+      } else {
+        this.currentVoice = voice;
+        this.currentSpeed = speed;
       }
 
       // Split text into sentences
@@ -211,7 +233,7 @@ class ContentManager {
       this.isPaused = false;
 
       // Start reading sentences
-      await this.readNextSentence(voice, speed);
+      await this.readNextSentence(this.currentVoice, this.currentSpeed);
     } catch (error) {
       console.error('TTS Error:', error);
       this.isPlaying = false;
@@ -261,19 +283,29 @@ class ContentManager {
     const sentence = this.sentences[this.currentSentenceIndex];
 
     try {
-      // Update reader highlight
+      // Update reader highlight before reading
       await chrome.runtime.sendMessage({
         action: 'updateReaderHighlight',
         index: this.currentSentenceIndex,
         text: sentence.text
       });
 
-      // Read the sentence
+      // Check if we should stop before reading
+      if (this.isPaused) {
+        return;
+      }
+
+      // Read the sentence and wait for it to complete
       await this.readSentence(sentence.text, voice, speed);
 
-      // Move to next sentence
-      this.currentSentenceIndex++;
-      await this.readNextSentence(voice, speed);
+      // Check if we should continue after the sentence is finished
+      if (!this.isPaused && this.isPlaying) {
+        // Move to next sentence
+        this.currentSentenceIndex++;
+        // Small delay to ensure proper timing between sentences
+        await new Promise(resolve => setTimeout(resolve, 100));
+        await this.readNextSentence(voice, speed);
+      }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
       console.error('Error reading sentence:', errorMessage);
@@ -306,7 +338,23 @@ class ContentManager {
           await audioContext.resume();
         }
 
-        console.log('Setting TTS metadata:', { voice, format: OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3 });
+        // Store the current sentence promise resolver
+        let currentSentenceResolver = resolve;
+
+        // Function to clean up current playback
+        const cleanup = () => {
+          if (this.sourceNode) {
+            try {
+              this.sourceNode.stop();
+              this.sourceNode.disconnect();
+            } catch (e) {
+              console.error('Error cleaning up audio:', e);
+            }
+            this.sourceNode = null;
+          }
+        };
+
+        console.log('Setting TTS metadata:', { voice });
         await this.ttsClient.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
 
         const options = new ProsodyOptions();
@@ -330,11 +378,22 @@ class ContentManager {
 
         // Set up event handlers
         stream.on('data', (chunk: Uint8Array) => {
+          if (this.isPaused) {
+            cleanup();
+            currentSentenceResolver();
+            return;
+          }
           console.log('Received audio chunk:', chunk.length, 'bytes');
           allChunks.push(chunk);
         });
 
         stream.on('end', async () => {
+          if (this.isPaused) {
+            cleanup();
+            currentSentenceResolver();
+            return;
+          }
+
           console.log('Stream ended, total chunks:', allChunks.length);
           if (allChunks.length === 0) {
             console.error('Stream ended without receiving any data');
@@ -357,8 +416,8 @@ class ContentManager {
             console.log('Audio buffer created:', { duration: audioBuffer.duration, channels: audioBuffer.numberOfChannels });
 
             if (this.isPaused) {
-              console.log('Playback paused, skipping audio');
-              resolve();
+              cleanup();
+              currentSentenceResolver();
               return;
             }
 
@@ -374,12 +433,20 @@ class ContentManager {
             sourceNode.onended = () => {
               console.log('Audio finished playing');
               this.sourceNode = null;
-              resolve();
+              currentSentenceResolver();
             };
 
             // Start playing
             sourceNode.start();
             console.log('Started playing audio');
+
+            // Send message to reader tab that we're playing this sentence
+            chrome.runtime.sendMessage({
+              action: 'readingStatus',
+              status: 'playing',
+              sentenceIndex: this.currentSentenceIndex
+            }).catch(console.error);
+
           } catch (error) {
             console.error('Audio playback error:', error);
             reject(error);
@@ -394,10 +461,17 @@ class ContentManager {
   }
 
   private async resumeReading() {
-    console.log('Resuming playback');
+    console.log('Resuming playback from sentence index:', this.currentSentenceIndex);
+    if (!this.currentVoice || !this.currentSpeed) {
+      const settings = await this.getSettings();
+      this.currentVoice = settings.voice;
+      this.currentSpeed = settings.speed;
+    }
+
     this.isPaused = false;
-    const settings = await this.getSettings();
-    await this.readNextSentence(settings.voice, settings.speed);
+    this.isPlaying = true;
+
+    await this.readNextSentence(this.currentVoice, this.currentSpeed);
   }
 
   private pauseReading() {
@@ -410,13 +484,16 @@ class ContentManager {
         this.sourceNode.stop();
         this.sourceNode.disconnect();
       } catch (e) {
-        // Ignore errors if already stopped
+        console.error('Error stopping audio:', e);
       }
       this.sourceNode = null;
     }
 
     // Clear any pending audio
     this.audioChunks = [];
+
+    // Keep the current sentence index for resuming later
+    console.log('Paused at sentence index:', this.currentSentenceIndex);
   }
 
   private async getSettings(): Promise<{ voice: string; speed: number }> {
@@ -434,16 +511,19 @@ class ContentManager {
   private stopReading() {
     console.log('Stopping playback');
     this.isPaused = false;
-    this.currentSentenceIndex = 0;
     this.isPlaying = false;
+    this.currentVoice = null;
+    this.currentSpeed = null;
+    this.currentSentenceIndex = 0;
+    this.sentences = [];
 
-    // Stop current audio
+    // Stop and cleanup current audio
     if (this.sourceNode) {
       try {
         this.sourceNode.stop();
         this.sourceNode.disconnect();
       } catch (e) {
-        // Ignore errors if already stopped
+        console.error('Error stopping audio:', e);
       }
       this.sourceNode = null;
     }
@@ -463,7 +543,18 @@ class ContentManager {
     // Clear any pending audio
     this.audioChunks = [];
 
-    // Notify the reader that reading has stopped
+    // Clear current stream
+    if (this.currentStream) {
+      try {
+        // @ts-ignore - EventEmitter cleanup
+        this.currentStream.removeAllListeners();
+      } catch (e) {
+        console.error('Error cleaning up stream:', e);
+      }
+      this.currentStream = null;
+    }
+
+    // Notify the background script that reading has stopped
     chrome.runtime.sendMessage({ action: 'readingStopped' }).catch(console.error);
   }
 }
