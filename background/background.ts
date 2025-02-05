@@ -99,48 +99,33 @@ class BackgroundManager {
 
           case 'readFromIndex':
             if (this.sourceTabId) {
-              // First stop current reading without closing reader
-              this.sendMessageToTab(this.sourceTabId, {
-                action: 'stopReading',
-                closeReader: false
-              })
-                .then(() => {
-                  // Wait a bit for cleanup
-                  setTimeout(async () => {
-                    try {
-                      if (this.sourceTabId) {
-                        console.log('Sending readFromIndex to source tab:', message.index);
-                        // Send readFromIndex to source tab
-                        await this.sendMessageToTab(this.sourceTabId, {
-                          action: 'readFromIndex',
-                          index: message.index
-                        });
+              console.log('Handling readFromIndex for index:', message.index);
+              (async () => {
+                try {
+                  // Send readFromIndex directly to content script
+                  await this.sendMessageToTab(this.sourceTabId!, {
+                    action: 'readFromIndex',
+                    index: message.index
+                  });
 
-                        // Enable controls in reader tab
-                        if (this.readerTabId) {
-                          await this.sendMessageToTab(this.readerTabId, {
-                            action: 'readingStarted'
-                          });
-                        }
-                        sendResponse({ status: 'success' });
-                      }
-                    } catch (error) {
-                      console.error('Error in readFromIndex:', error);
-                      // Notify reader tab of error
-                      if (this.readerTabId) {
-                        await this.sendMessageToTab(this.readerTabId, {
-                          action: 'error',
-                          error: error instanceof Error ? error.message : 'Failed to start reading'
-                        });
-                      }
-                      sendResponse({ status: 'error', error: error instanceof Error ? error.message : 'Failed to start reading' });
-                    }
-                  }, 100);
-                })
-                .catch(error => {
-                  console.error('Error stopping current reading:', error);
-                  sendResponse({ status: 'error', error: error.message });
-                });
+                  // Enable controls in reader tab
+                  if (this.readerTabId) {
+                    await this.sendMessageToTab(this.readerTabId, {
+                      action: 'readingStarted'
+                    });
+                  }
+                  sendResponse({ status: 'success' });
+                } catch (error) {
+                  console.error('Error in readFromIndex:', error);
+                  if (this.readerTabId) {
+                    await this.sendMessageToTab(this.readerTabId, {
+                      action: 'error',
+                      error: error instanceof Error ? error.message : 'Failed to start reading'
+                    });
+                  }
+                  sendResponse({ status: 'error', error: error instanceof Error ? error.message : 'Failed to start reading' });
+                }
+              })();
               return true; // Keep message channel open
             }
             sendResponse({ status: 'error', error: 'No source tab found' });

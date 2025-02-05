@@ -12,7 +12,6 @@ class ReaderManager {
   private pauseButton: HTMLButtonElement;
   private resumeButton: HTMLButtonElement;
   private stopButton: HTMLButtonElement;
-  private currentHighlight: HTMLElement | null = null;
 
   constructor() {
     // Initialize elements
@@ -26,7 +25,43 @@ class ReaderManager {
 
     this.setupMessageListener();
     this.setupControlButtons();
-    this.setupEventListeners();
+    this.setupClickToRead();
+  }
+
+  private setupClickToRead() {
+    // Add click handler style
+    if (!document.querySelector('#sentence-styles')) {
+      const style = document.createElement('style');
+      style.id = 'sentence-styles';
+      style.textContent = `
+        [data-sentence-index] {
+          cursor: pointer;
+        }
+        [data-sentence-index]:hover {
+          background-color: rgba(0, 0, 0, 0.05);
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    // Add click handler for sentences
+    this.content.addEventListener('click', (event) => {
+      const target = event.target as HTMLElement;
+      const sentence = target.closest('[data-sentence-index]');
+      if (sentence) {
+        const index = parseInt(sentence.getAttribute('data-sentence-index') || '-1', 10);
+        if (index >= 0) {
+          console.log('Clicked sentence index:', index);
+          chrome.runtime.sendMessage({
+            action: 'readFromIndex',
+            index: index
+          }).catch(error => {
+            console.error('Failed to start reading from index:', error);
+            this.showError('Failed to start reading from selected sentence');
+          });
+        }
+      }
+    });
   }
 
   private setupMessageListener() {
@@ -37,10 +72,6 @@ class ReaderManager {
         switch (message.action) {
           case 'updateContent':
             this.updateContent(message.content, message.title, message.metadata);
-            sendResponse({ status: 'success' });
-            break;
-          case 'highlightSentence':
-            this.highlightSentence(message.index, message.text);
             sendResponse({ status: 'success' });
             break;
           case 'readingStarted':
@@ -81,32 +112,11 @@ class ReaderManager {
     });
 
     this.stopButton.addEventListener('click', () => {
-      chrome.runtime.sendMessage({ action: 'stopReading' });
+      chrome.runtime.sendMessage({
+        action: 'stopReading',
+        closeReader: true
+      });
       this.disableControls();
-    });
-  }
-
-  private setupEventListeners() {
-    // Add click handler for sentences
-    this.content.addEventListener('click', (event) => {
-      const target = event.target as HTMLElement;
-      const sentence = target.closest('[data-sentence-index]');
-      if (sentence) {
-        const index = parseInt(sentence.getAttribute('data-sentence-index') || '-1', 10);
-        if (index >= 0) {
-          console.log('Clicked sentence index:', index);
-          // Enable controls when starting to read from new index
-          this.enableControls();
-          chrome.runtime.sendMessage({
-            action: 'readFromIndex',
-            index: index
-          }).catch(error => {
-            console.error('Failed to start reading from index:', error);
-            this.showError('Failed to start reading from selected sentence');
-            this.disableControls();
-          });
-        }
-      }
     });
   }
 
@@ -131,25 +141,6 @@ class ReaderManager {
 
     // First, set the content to preserve HTML structure
     this.content.innerHTML = content;
-
-    // Add click handler style
-    if (!document.querySelector('#sentence-styles')) {
-      const style = document.createElement('style');
-      style.id = 'sentence-styles';
-      style.textContent = `
-        [data-sentence-index] {
-          cursor: pointer;
-          transition: background-color 0.2s;
-        }
-        [data-sentence-index]:hover {
-          background-color: rgba(0, 0, 0, 0.05);
-        }
-        [data-sentence-index].active {
-          background-color: #e3f2fd;
-        }
-      `;
-      document.head.appendChild(style);
-    }
 
     // Now wrap text in clickable elements while preserving HTML
     let sentenceIndex = 0;
@@ -197,21 +188,6 @@ class ReaderManager {
 
     // Enable controls
     this.enableControls();
-  }
-
-  private highlightSentence(index: number, text: string) {
-    // Remove previous highlight
-    const previousHighlight = this.content.querySelector('[data-sentence-index].active');
-    if (previousHighlight) {
-      previousHighlight.classList.remove('active');
-    }
-
-    // Add new highlight
-    const sentence = this.content.querySelector(`[data-sentence-index="${index}"]`);
-    if (sentence) {
-      sentence.classList.add('active');
-      sentence.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
   }
 
   private enableControls() {
