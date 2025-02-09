@@ -1,3 +1,5 @@
+import { TextProcessor } from '../shared/text-processor';
+
 interface ReaderMetadata {
   author?: string;
   siteName?: string;
@@ -36,32 +38,96 @@ class ReaderManager {
       style.textContent = `
         [data-sentence-index] {
           cursor: pointer;
+          position: relative;
+          padding-left: 2px;
+          padding-right: 2px;
+          border-radius: 2px;
         }
         [data-sentence-index]:hover {
           background-color: rgba(0, 0, 0, 0.05);
+        }
+        [data-sentence-index].active {
+          background-color: rgba(0, 120, 255, 0.1);
+        }
+        [data-sentence-index].active::before {
+          content: '▶';
+          position: absolute;
+          left: -15px;
+          color: rgba(0, 120, 255, 0.8);
+          font-size: 10px;
         }
       `;
       document.head.appendChild(style);
     }
 
     // Add click handler for sentences
-    this.content.addEventListener('click', (event) => {
+    this.content.addEventListener('click', async (event) => {
       const target = event.target as HTMLElement;
       const sentence = target.closest('[data-sentence-index]');
       if (sentence) {
         const index = parseInt(sentence.getAttribute('data-sentence-index') || '-1', 10);
         if (index >= 0) {
-          console.log('Clicked sentence index:', index);
-          chrome.runtime.sendMessage({
-            action: 'readFromIndex',
-            index: index
-          }).catch(error => {
+          console.log('=== Click To Read Debug ===');
+          console.log('Clicked element:', sentence.outerHTML);
+          console.log('Clicked index:', index);
+          console.log('Clicked text:', sentence.textContent);
+
+          try {
+            // Update visual state first
+            this.updateActiveSentence(index);
+
+            // Send message to background script to update reading position
+            console.log('Sending readFromIndex message:', index);
+            const response = await chrome.runtime.sendMessage({
+              action: 'readFromIndex',
+              index: index
+            });
+
+            console.log('Received response:', response);
+
+            if (response?.status === 'error') {
+              throw new Error(response.error || 'Failed to start reading');
+            }
+
+            // Enable controls only after successful response
+            this.enableControls();
+          } catch (error) {
             console.error('Failed to start reading from index:', error);
             this.showError('Failed to start reading from selected sentence');
-          });
+            this.clearActiveSentence();
+          }
         }
       }
     });
+  }
+
+  private updateActiveSentence(index: number) {
+    // Remove active class from all sentences
+    this.clearActiveSentence();
+
+    // Add active class to new sentence
+    const newActiveSentence = this.content.querySelector(`[data-sentence-index="${index}"]`);
+    if (newActiveSentence) {
+      newActiveSentence.classList.add('active');
+
+      // Scroll sentence into view if not visible
+      newActiveSentence.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+        inline: 'nearest'
+      });
+    }
+  }
+
+  private clearActiveSentence() {
+    this.content.querySelectorAll('[data-sentence-index].active').forEach(el => {
+      el.classList.remove('active');
+    });
+  }
+
+  // Update the highlightSentence method to use our new active sentence system
+  public highlightSentence(index: number) {
+    this.updateActiveSentence(index);
   }
 
   private setupMessageListener() {
@@ -121,6 +187,7 @@ class ReaderManager {
   }
 
   private updateContent(content: string, title?: string, metadata?: ReaderMetadata) {
+    console.log('=== Update Content Debug ===');
     // Update title
     this.title.textContent = title || 'Reader View';
 
@@ -142,7 +209,7 @@ class ReaderManager {
     // First, set the content to preserve HTML structure
     this.content.innerHTML = content;
 
-    // Now wrap text in clickable elements while preserving HTML
+    // Process text nodes while preserving HTML structure
     let sentenceIndex = 0;
     const textNodes = [];
     const walk = document.createTreeWalker(
@@ -150,9 +217,8 @@ class ReaderManager {
       NodeFilter.SHOW_TEXT,
       {
         acceptNode: function (node) {
-          // Skip script and style contents
-          if (node.parentElement?.tagName === 'SCRIPT' ||
-            node.parentElement?.tagName === 'STYLE') {
+          const parent = node.parentElement;
+          if (parent?.tagName === 'SCRIPT' || parent?.tagName === 'STYLE') {
             return NodeFilter.FILTER_REJECT;
           }
           return NodeFilter.FILTER_ACCEPT;
@@ -165,23 +231,38 @@ class ReaderManager {
       textNodes.push(node);
     }
 
-    textNodes.forEach(textNode => {
+    console.log('Found text nodes:', textNodes.length);
+
+    // Process each text node
+    textNodes.forEach((textNode) => {
       const text = textNode.textContent || '';
-      const sentences = text.split(/(?<=[.!?])\s+/);
-      if (sentences.length > 0 && textNode.parentNode) {
-        const fragment = document.createDocumentFragment();
-        sentences.forEach(sentence => {
-          if (sentence.trim()) {
-            const span = document.createElement('span');
-            span.setAttribute('data-sentence-index', sentenceIndex.toString());
-            span.textContent = sentence + ' ';
-            fragment.appendChild(span);
-            sentenceIndex++;
-          }
+      if (!text.trim()) return;
+
+      // Get sentences from this text node
+      const sentences = TextProcessor.splitIntoSentences(text);
+      if (sentences.length === 0) return;
+
+      // Create a document fragment to hold the sentence spans
+      const fragment = document.createDocumentFragment();
+      sentences.forEach((sentence) => {
+        const span = document.createElement('span');
+        span.setAttribute('data-sentence-index', sentenceIndex.toString());
+        span.textContent = sentence.text + ' ';
+        fragment.appendChild(span);
+        console.log(`Created span for sentence ${sentenceIndex}:`, {
+          text: sentence.text.substring(0, 50) + (sentence.text.length > 50 ? '...' : ''),
+          parentTag: textNode.parentElement?.tagName
         });
+        sentenceIndex++;
+      });
+
+      // Replace the text node with our sentence spans
+      if (textNode.parentNode) {
         textNode.parentNode.replaceChild(fragment, textNode);
       }
     });
+
+    console.log('Total sentences created:', sentenceIndex);
 
     // Hide error message
     this.hideError();
