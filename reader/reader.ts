@@ -1,3 +1,4 @@
+import browser from 'webextension-polyfill';
 import { TextProcessor } from '../shared/text-processor';
 
 interface ReaderMetadata {
@@ -78,7 +79,7 @@ class ReaderManager {
 
             // Send message to background script to update reading position
             console.log('Sending readFromIndex message:', index);
-            const response = await chrome.runtime.sendMessage({
+            const response = await browser.runtime.sendMessage({
               action: 'readFromIndex',
               index: index
             });
@@ -131,54 +132,56 @@ class ReaderManager {
   }
 
   private setupMessageListener() {
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    browser.runtime.onMessage.addListener((message, sender) => {
       console.log('Reader received message:', message);
 
       try {
         switch (message.action) {
+          case 'ping':
+            console.log('Received ping, responding with pong');
+            return Promise.resolve({ status: 'pong' });
+
           case 'updateContent':
             this.updateContent(message.content, message.title, message.metadata);
-            sendResponse({ status: 'success' });
-            break;
+            return Promise.resolve({ status: 'success' });
+
           case 'readingStarted':
             this.enableControls();
-            sendResponse({ status: 'success' });
-            break;
+            return Promise.resolve({ status: 'success' });
+
           case 'readingStopped':
             this.disableControls();
-            sendResponse({ status: 'success' });
-            break;
+            return Promise.resolve({ status: 'success' });
+
           case 'error':
             this.showError(message.error);
-            sendResponse({ status: 'success' });
-            break;
+            return Promise.resolve({ status: 'success' });
+
           default:
-            sendResponse({ status: 'error', error: 'Unknown action' });
+            return Promise.resolve({ status: 'error', error: 'Unknown action' });
         }
       } catch (error) {
         console.error('Error handling message:', error);
-        sendResponse({ status: 'error', error: error instanceof Error ? error.message : 'Unknown error' });
+        return Promise.resolve({ status: 'error', error: error instanceof Error ? error.message : 'Unknown error' });
       }
-
-      return false; // Don't keep the message channel open
     });
   }
 
   private setupControlButtons() {
     this.pauseButton.addEventListener('click', () => {
-      chrome.runtime.sendMessage({ action: 'pauseReading' });
+      browser.runtime.sendMessage({ action: 'pauseReading' });
       this.pauseButton.disabled = true;
       this.resumeButton.disabled = false;
     });
 
     this.resumeButton.addEventListener('click', () => {
-      chrome.runtime.sendMessage({ action: 'resumeReading' });
+      browser.runtime.sendMessage({ action: 'resumeReading' });
       this.resumeButton.disabled = true;
       this.pauseButton.disabled = false;
     });
 
     this.stopButton.addEventListener('click', () => {
-      chrome.runtime.sendMessage({
+      browser.runtime.sendMessage({
         action: 'stopReading',
         closeReader: true
       });

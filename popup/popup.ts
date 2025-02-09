@@ -1,3 +1,5 @@
+import browser from 'webextension-polyfill';
+
 class PopupManager {
   private voiceSelect!: HTMLSelectElement;
   private speedSlider!: HTMLInputElement;
@@ -52,69 +54,86 @@ class PopupManager {
 
   private async loadSavedSettings(): Promise<void> {
     try {
-      const settings = await chrome.storage.sync.get({
+      const defaultSettings = {
         voice: 'en-US-AvaNeural',
         speed: 1.0
-      });
+      };
+
+      const result = await browser.storage.sync.get(defaultSettings);
+      const settings = {
+        voice: result.voice || defaultSettings.voice,
+        speed: result.speed || defaultSettings.speed
+      };
 
       this.voiceSelect.value = settings.voice;
       this.speedSlider.value = settings.speed.toString();
       this.speedValue.textContent = `${settings.speed.toFixed(2)}x`;
     } catch (error) {
       console.error('Failed to load settings:', error);
+      // Set default values if loading fails
+      this.voiceSelect.value = 'en-US-AvaNeural';
+      this.speedSlider.value = '1.0';
+      this.speedValue.textContent = '1.00x';
     }
   }
 
   private setupEventListeners(): void {
     // Speed slider event
-    this.speedSlider.addEventListener('input', () => {
+    this.speedSlider.addEventListener('input', async () => {
       try {
         const speed = parseFloat(this.speedSlider.value);
         this.speedValue.textContent = `${speed.toFixed(2)}x`;
-        chrome.storage.sync.set({ speed }).catch(error => {
-          console.error('Failed to save speed setting:', error);
-        });
+        await browser.storage.sync.set({ speed });
       } catch (error) {
-        console.error('Error handling speed change:', error);
+        console.error('Failed to save speed setting:', error);
       }
     });
 
     // Voice select event
-    this.voiceSelect.addEventListener('change', () => {
+    this.voiceSelect.addEventListener('change', async () => {
       try {
-        chrome.storage.sync.set({ voice: this.voiceSelect.value }).catch(error => {
-          console.error('Failed to save voice setting:', error);
-        });
+        await browser.storage.sync.set({ voice: this.voiceSelect.value });
       } catch (error) {
-        console.error('Error handling voice change:', error);
+        console.error('Failed to save voice setting:', error);
       }
     });
 
     // Start reading button
     this.startButton.addEventListener('click', async () => {
       try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+        const tab = tabs[0];
         if (!tab?.id) {
           throw new Error('No active tab found');
         }
 
-        console.log('Sending startReading message to tab:', tab.id); // Debug log
-        const response = await chrome.tabs.sendMessage(tab.id, {
+        // First, store the source tab ID
+        await browser.runtime.sendMessage({
+          action: 'setSourceTab',
+          tabId: tab.id
+        });
+
+        console.log('Starting reading in tab:', tab.id);
+        const response = await browser.tabs.sendMessage(tab.id, {
           action: 'startReading',
           voice: this.voiceSelect.value,
           speed: parseFloat(this.speedSlider.value)
         });
 
-        console.log('Received response:', response); // Debug log
+        console.log('Received response:', response);
 
-        if (!response || response.status !== 'started') {
-          throw new Error('Failed to start reading: Invalid response');
+        if (!response) {
+          throw new Error('No response received from content script');
+        }
+
+        if (response.status !== 'success') {
+          throw new Error(response?.error || 'Failed to start reading: Invalid response');
         }
       } catch (error: any) {
         console.error('Failed to start reading:', error);
         // Check for content script not injected error
         if (error?.message?.includes('Could not establish connection')) {
-          this.showError('Please refresh the page and try again. The reader needs to be reinitialized.');
+          this.showError('Please refresh the page and try again. The content script needs to be reinitialized.');
         } else {
           this.showError('Failed to start reading. ' + (error.message || 'Unknown error occurred.'));
         }
@@ -124,20 +143,21 @@ class PopupManager {
     // Stop reading button
     this.stopButton.addEventListener('click', async () => {
       try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+        const tab = tabs[0];
         if (!tab?.id) {
           throw new Error('No active tab found');
         }
 
-        console.log('Sending stopReading message to tab:', tab.id); // Debug log
-        const response = await chrome.tabs.sendMessage(tab.id, {
+        console.log('Sending stopReading message to tab:', tab.id);
+        const response = await browser.tabs.sendMessage(tab.id, {
           action: 'stopReading'
         });
 
-        console.log('Received response:', response); // Debug log
+        console.log('Received response:', response);
 
-        if (!response || response.status !== 'stopped') {
-          throw new Error('Failed to stop reading: Invalid response');
+        if (!response || response.status !== 'success') {
+          throw new Error(response?.error || 'Failed to stop reading: Invalid response');
         }
       } catch (error: any) {
         console.error('Failed to stop reading:', error);

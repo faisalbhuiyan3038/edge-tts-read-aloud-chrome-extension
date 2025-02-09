@@ -1,18 +1,25 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "ES2020",
+    "target": "es2020",
+    "module": "es2020",
     "moduleResolution": "node",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "outDir": "./dist",
-    "types": ["chrome", "@types/chrome"],
-    "lib": ["DOM", "ES2020", "DOM.Iterable"],
-    "allowJs": true,
-    "checkJs": false
+    "rootDir": "./",
+    "sourceMap": true,
+    "types": [
+      "@types/webextension-polyfill",
+      "@types/chrome"
+    ]
   },
-  "include": ["**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

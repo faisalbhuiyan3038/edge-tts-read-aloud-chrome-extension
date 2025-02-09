@@ -43,7 +43,11 @@ module.exports = {
         { from: "popup/popup.html", to: "popup/popup.html" },
         { from: "popup/popup.css", to: "popup/popup.css" },
         { from: "reader/reader.html", to: "reader/reader.html" },
-        { from: "icons", to: "icons" }
+        { from: "icons", to: "icons" },
+        {
+          from: "node_modules/webextension-polyfill/dist/browser-polyfill.min.js",
+          to: "browser-polyfill.js"
+        }
       ],
     }),
   ],

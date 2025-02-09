@@ -1,3 +1,11 @@
+// Add type declaration at the top of the file
+declare global {
+  interface Window {
+    webkitAudioContext: typeof AudioContext;
+  }
+}
+
+import browser from 'webextension-polyfill';
 import { EdgeTTSClient, ProsodyOptions, OUTPUT_FORMAT } from 'edge-tts-client';
 import { Readability } from '@mozilla/readability';
 import { EventEmitter } from 'events';
@@ -69,105 +77,126 @@ class ContentManager {
   ]);
 
   constructor() {
+    console.log('Content script initializing...');
     this.setupMessageListener();
+    console.log('Content script initialized');
   }
 
   private setupMessageListener() {
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      console.log('Content script received message:', message);
+    browser.runtime.onMessage.addListener((message, sender) => {
+      console.log('Content script received message:', message, 'from:', sender);
 
       try {
         switch (message.action) {
           case 'startReading':
+            console.log('Starting reading with:', {
+              voice: message.voice,
+              speed: message.speed
+            });
             if (message.startFromIndex !== undefined) {
               // Start reading from specific index
-              this.readFromIndex(message.startFromIndex)
-                .then(() => sendResponse({ status: 'success' }))
+              return this.readFromIndex(message.startFromIndex)
+                .then(() => ({ status: 'success' }))
                 .catch(error => {
-                  console.error('Start reading from index error:', error);
-                  sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+                  console.error('Failed to read from index:', error);
+                  return {
+                    status: 'error',
+                    error: error instanceof Error ? error.message : String(error)
+                  };
                 });
             } else {
               // Start reading from beginning
-              this.startReading(message.voice, message.speed)
-                .then(() => sendResponse({ status: 'success' }))
+              return this.startReading(message.voice, message.speed)
+                .then(() => ({ status: 'success' }))
                 .catch(error => {
-                  console.error('Start reading error:', error);
-                  sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+                  console.error('Failed to start reading:', error);
+                  return {
+                    status: 'error',
+                    error: error instanceof Error ? error.message : String(error)
+                  };
                 });
             }
-            break;
 
           case 'readFromIndex':
             if (typeof message.index === 'number') {
-              this.readFromIndex(message.index)
-                .then(() => sendResponse({ status: 'success' }))
-                .catch(error => {
-                  console.error('Read from index error:', error);
-                  sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
-                });
+              return this.readFromIndex(message.index)
+                .then(() => ({ status: 'success' }))
+                .catch(error => ({
+                  status: 'error',
+                  error: error instanceof Error ? error.message : String(error)
+                }));
             } else {
               console.error('Invalid index type:', message.index);
-              sendResponse({ status: 'error', error: 'Invalid index type' });
+              return Promise.resolve({ status: 'error', error: 'Invalid index type' });
             }
-            break;
 
           case 'readSelection':
             const selection = window.getSelection()?.toString().trim();
             if (selection) {
-              this.startReadingText(selection, undefined, undefined)
-                .then(() => sendResponse({ status: 'success' }))
-                .catch(error => {
-                  console.error('Read selection error:', error);
-                  sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
-                });
+              return this.startReadingText(selection, undefined, undefined)
+                .then(() => ({ status: 'success' }))
+                .catch(error => ({
+                  status: 'error',
+                  error: error instanceof Error ? error.message : String(error)
+                }));
             } else {
-              sendResponse({ status: 'error', error: 'No text selected' });
+              return Promise.resolve({ status: 'error', error: 'No text selected' });
             }
-            break;
 
           case 'stopReading':
             try {
               this.stopReading(message.closeReader);
               this.currentSentenceIndex = 0; // Reset to beginning
-              sendResponse({ status: 'success' });
+              return Promise.resolve({ status: 'success' });
             } catch (error) {
               console.error('Stop reading error:', error);
-              sendResponse({ status: 'error', error: 'Failed to stop reading' });
+              return Promise.resolve({ status: 'error', error: 'Failed to stop reading' });
             }
-            break;
 
           case 'pauseReading':
             try {
               this.pauseReading();
-              sendResponse({ status: 'success' });
+              return Promise.resolve({ status: 'success' });
             } catch (error) {
               console.error('Pause reading error:', error);
-              sendResponse({ status: 'error', error: 'Failed to pause reading' });
+              return Promise.resolve({ status: 'error', error: 'Failed to pause reading' });
             }
-            break;
 
           case 'resumeReading':
-            this.resumeReading()
-              .then(() => sendResponse({ status: 'success' }))
-              .catch(error => {
-                console.error('Resume reading error:', error);
-                sendResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) });
-              });
-            break;
+            return this.resumeReading()
+              .then(() => ({ status: 'success' }))
+              .catch(error => ({
+                status: 'error',
+                error: error instanceof Error ? error.message : String(error)
+              }));
         }
+
+        return Promise.resolve({ status: 'error', error: 'Unknown action' });
       } catch (error) {
         console.error('Message handling error:', error);
-        sendResponse({ status: 'error', error: 'Failed to process message' });
+        return Promise.resolve({
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Failed to process message'
+        });
       }
-
-      return true; // Keep the message channel open for async response
     });
   }
 
   private async startReading(voice?: string, speed?: number) {
     try {
+      console.log('=== Start Reading Debug ===');
+      console.log('Starting reading with voice:', voice, 'speed:', speed);
+
+      // Stop any existing reading
       this.stopReading();
+
+      // Get settings if not provided
+      if (!voice || !speed) {
+        const settings = await this.getSettings();
+        console.log('Retrieved settings:', settings);
+        voice = voice || settings.voice;
+        speed = speed || settings.speed;
+      }
 
       const article = this.parsePageContent();
       if (!article) {
@@ -182,8 +211,9 @@ class ContentManager {
       // Format the content for the reader, using the same sentences array
       const formattedContent = this.formatArticleContent(article, this.sentences);
 
+      console.log('Opening reader tab with content');
       // Open reader tab with the parsed text and wait for it to be ready
-      const response = await chrome.runtime.sendMessage({
+      const response = await browser.runtime.sendMessage({
         action: 'openReader',
         text: formattedContent,
         title: article.title,
@@ -194,22 +224,40 @@ class ContentManager {
         }
       });
 
+      console.log('Reader tab response:', response);
       if (response?.status === 'error') {
         throw new Error(response.error);
       }
 
       // Wait for the reader tab to fully initialize
+      console.log('Waiting for reader tab initialization');
       await new Promise(resolve => setTimeout(resolve, 1000));
 
       // Start reading the text
-      await this.startReadingText(textContent, voice, speed);
+      console.log('Starting text-to-speech');
+      try {
+        await this.startReadingText(textContent, voice, speed);
+      } catch (error) {
+        console.error('Failed to start reading text:', error);
+        // Send error to reader tab
+        await browser.runtime.sendMessage({
+          action: 'error',
+          error: error instanceof Error ? error.message : 'Failed to start text-to-speech'
+        });
+        throw error;
+      }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
       console.error('Failed to start reading:', errorMessage);
-      chrome.runtime.sendMessage({
-        action: 'updateReaderContent',
-        error: errorMessage
-      });
+      // Try to notify the reader tab about the error
+      try {
+        await browser.runtime.sendMessage({
+          action: 'error',
+          error: errorMessage
+        });
+      } catch (e) {
+        console.error('Failed to send error to reader tab:', e);
+      }
       throw new Error(errorMessage);
     }
   }
@@ -270,6 +318,7 @@ class ContentManager {
 
   private async startReadingText(content: string | HTMLElement, voice?: string, speed?: number) {
     try {
+      console.log('=== Start Reading Text Debug ===');
       console.log('Starting to read text:', {
         contentType: typeof content === 'string' ? 'string' : 'HTMLElement',
         voice,
@@ -279,6 +328,7 @@ class ContentManager {
       // Get settings if not provided
       if (!voice || !speed) {
         const settings = await this.getSettings();
+        console.log('Retrieved settings:', settings);
         this.currentVoice = voice || settings.voice;
         this.currentSpeed = speed || settings.speed;
       } else {
@@ -288,6 +338,7 @@ class ContentManager {
 
       // Extract text content using shared processor
       const textContent = TextProcessor.extractTextContent(content);
+      console.log('Extracted text content length:', textContent.length);
 
       // Initialize sentences array using shared processor
       this.sentences = TextProcessor.splitIntoSentences(textContent);
@@ -298,6 +349,10 @@ class ContentManager {
       this.isPlaying = true;
 
       // Start reading sentences
+      console.log('Starting to read sentences with:', {
+        voice: this.currentVoice,
+        speed: this.currentSpeed
+      });
       await this.readNextSentence(this.currentVoice, this.currentSpeed);
     } catch (error) {
       console.error('TTS Error:', error);
@@ -422,6 +477,14 @@ class ContentManager {
   }
 
   private async readNextSentence(voice: string, speed: number) {
+    console.log('=== Read Next Sentence Debug ===');
+    console.log('State:', {
+      isPaused: this.isPaused,
+      isPlaying: this.isPlaying,
+      currentIndex: this.currentSentenceIndex,
+      totalSentences: this.sentences.length
+    });
+
     if (this.isPaused || !this.isPlaying || this.currentSentenceIndex >= this.sentences.length) {
       console.log('ReadNextSentence early return:', {
         isPaused: this.isPaused,
@@ -438,20 +501,22 @@ class ContentManager {
     const sentence = this.sentences[this.currentSentenceIndex];
     console.log('Reading sentence:', {
       index: this.currentSentenceIndex,
-      text: sentence.text,
+      text: sentence.text.substring(0, 50) + '...',
       isHeading: sentence.isHeading
     });
 
     try {
       // Notify the reader about the current sentence
-      await chrome.runtime.sendMessage({
+      await browser.runtime.sendMessage({
         action: 'updateReaderHighlight',
         index: this.currentSentenceIndex,
         text: sentence.text
       });
 
+      console.log('Starting sentence audio playback');
       // Read the sentence and wait for it to complete
       await this.readSentence(sentence.text, voice, speed);
+      console.log('Sentence audio playback completed');
 
       // Add a small delay between sentences for better pacing
       await new Promise(resolve => setTimeout(resolve, 250));
@@ -472,6 +537,7 @@ class ContentManager {
   private async readSentence(text: string, voice: string, speed: number): Promise<void> {
     return new Promise(async (resolve, reject) => {
       try {
+        console.log('=== Read Sentence Debug ===');
         if (!this.ttsClient) {
           console.log('Creating new TTS client');
           this.ttsClient = new EdgeTTSClient();
@@ -480,7 +546,25 @@ class ContentManager {
         // Initialize audio context if needed
         if (!this.audioContext) {
           console.log('Creating new AudioContext');
-          this.audioContext = new AudioContext();
+          try {
+            // Try to create audio context with user gesture
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+              // Firefox requires these options for better compatibility
+              latencyHint: 'interactive',
+              sampleRate: 48000
+            });
+            console.log('AudioContext created successfully:', this.audioContext.state);
+
+            // Ensure we have user interaction
+            if (this.audioContext.state === 'suspended') {
+              console.log('Audio context suspended, attempting to resume...');
+              await this.audioContext.resume();
+              console.log('AudioContext state after resume:', this.audioContext.state);
+            }
+          } catch (error) {
+            console.error('Failed to create AudioContext:', error);
+            throw new Error('Failed to initialize audio. Please ensure audio is enabled in your browser.');
+          }
         }
 
         const audioContext = this.audioContext;
@@ -533,16 +617,25 @@ class ContentManager {
 
         // Set up event handlers
         stream.on('data', (chunk: Uint8Array) => {
-          if (this.isPaused) {
-            cleanup();
-            currentSentenceResolver();
-            return;
-          }
+          console.log('Received audio chunk:', {
+            chunkSize: chunk.length,
+            totalChunks: allChunks.length + 1
+          });
           allChunks.push(chunk);
         });
 
+        stream.on('error', (error: Error) => {
+          console.error('Stream error:', error);
+          cleanup();
+          reject(error);
+        });
+
         stream.on('end', async () => {
+          console.log('=== Stream End Debug ===');
+          console.log('Stream ended, total chunks:', allChunks.length);
+
           if (this.isPaused) {
+            console.log('Playback paused, cleaning up');
             cleanup();
             currentSentenceResolver();
             return;
@@ -557,6 +650,7 @@ class ContentManager {
           try {
             // Combine all chunks into one buffer
             const totalLength = allChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+            console.log('Creating combined buffer of size:', totalLength);
             const combinedBuffer = new Uint8Array(totalLength);
             let offset = 0;
             for (const chunk of allChunks) {
@@ -564,8 +658,20 @@ class ContentManager {
               offset += chunk.length;
             }
 
+            if (this.isPaused) {
+              cleanup();
+              currentSentenceResolver();
+              return;
+            }
+
+            console.log('Decoding audio data');
             // Create audio buffer
             const audioBuffer = await audioContext.decodeAudioData(combinedBuffer.buffer);
+            console.log('Audio buffer created:', {
+              duration: audioBuffer.duration,
+              numberOfChannels: audioBuffer.numberOfChannels,
+              sampleRate: audioBuffer.sampleRate
+            });
 
             if (this.isPaused) {
               cleanup();
@@ -574,6 +680,7 @@ class ContentManager {
             }
 
             // Create and connect source node
+            console.log('Creating and connecting source node');
             const sourceNode = audioContext.createBufferSource();
             sourceNode.buffer = audioBuffer;
             sourceNode.connect(audioContext.destination);
@@ -583,11 +690,13 @@ class ContentManager {
 
             // When audio ends, resolve the promise
             sourceNode.onended = () => {
+              console.log('Audio playback ended');
               this.sourceNode = null;
               currentSentenceResolver();
             };
 
             // Start playing
+            console.log('Starting audio playback');
             sourceNode.start();
 
           } catch (error) {
@@ -640,15 +749,8 @@ class ContentManager {
   }
 
   private async getSettings(): Promise<{ voice: string; speed: number }> {
-    return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ action: 'getSettings' }, (response) => {
-        if (chrome.runtime.lastError) {
-          reject(chrome.runtime.lastError);
-        } else {
-          resolve(response || { voice: 'en-US-AvaNeural', speed: 1.0 });
-        }
-      });
-    });
+    const response = await browser.runtime.sendMessage({ action: 'getSettings' });
+    return response || { voice: 'en-US-AvaNeural', speed: 1.0 };
   }
 
   private stopReading(closeReader: boolean = false, keepState: boolean = false) {
@@ -712,7 +814,7 @@ class ContentManager {
     // Only notify if we're actually stopping (not just for readFromIndex)
     if (!keepState) {
       // Notify the background script that reading has stopped
-      chrome.runtime.sendMessage({
+      browser.runtime.sendMessage({
         action: 'readingStopped',
         closeReader: closeReader
       }).catch(console.error);
