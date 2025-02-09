@@ -1,12 +1,7 @@
 import { EdgeTTSClient, ProsodyOptions, OUTPUT_FORMAT } from 'edge-tts-client';
 import { Readability } from '@mozilla/readability';
 import { EventEmitter } from 'events';
-
-interface Sentence {
-  text: string;
-  index: number;
-  isHeading?: boolean;
-}
+import { TextProcessor, Sentence } from '../shared/text-processor';
 
 interface ParsedArticle {
   title: string;
@@ -172,20 +167,16 @@ class ContentManager {
 
   private async startReading(voice?: string, speed?: number) {
     try {
-      // Stop any existing playback
       this.stopReading();
 
-      // Parse the page content using Readability
       const article = this.parsePageContent();
       if (!article) {
         throw new Error('Could not parse page content');
       }
 
       // Initialize sentences array from the article content
-      const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = article.content;
-      const textContent = this.extractTextContent(tempDiv);
-      this.sentences = this.splitIntoSentences(textContent);
+      const textContent = TextProcessor.extractTextContent(article.content);
+      this.sentences = TextProcessor.splitIntoSentences(textContent);
       console.log('Initialized sentences array:', this.sentences.length);
 
       // Format the content for the reader, using the same sentences array
@@ -224,40 +215,28 @@ class ContentManager {
   }
 
   private parsePageContent(): ParsedArticle | null {
-    // Clone the document to avoid modifying the original
-    const documentClone = document.cloneNode(true) as Document;
+    try {
+      const documentClone = document.cloneNode(true) as Document;
+      const reader = new Readability(documentClone, {
+        keepClasses: true,
+        classesToPreserve: ['chapter', 'article', 'section', 'title']
+      });
 
-    // Create new readability object
-    const reader = new Readability(documentClone, {
-      keepClasses: true,
-      classesToPreserve: ['chapter', 'article', 'section', 'title']
-    });
+      const article = reader.parse();
 
-    // Parse the content
-    return reader.parse();
-  }
-
-  private extractTextContent(element: Element): string {
-    let text = '';
-    const walk = document.createTreeWalker(
-      element,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode: function (node) {
-          const parent = node.parentElement;
-          if (parent?.tagName === 'SCRIPT' || parent?.tagName === 'STYLE') {
-            return NodeFilter.FILTER_REJECT;
-          }
-          return NodeFilter.FILTER_ACCEPT;
-        }
+      if (article && article.content) {
+        const textContent = TextProcessor.extractTextContent(article.content);
+        return {
+          ...article,
+          textContent
+        };
       }
-    );
 
-    let node;
-    while (node = walk.nextNode()) {
-      text += node.textContent + ' ';
+      return article;
+    } catch (error) {
+      console.error('Error parsing page content:', error);
+      return null;
     }
-    return text.trim();
   }
 
   private formatArticleContent(article: ParsedArticle, sentences: Sentence[]): string {
@@ -277,48 +256,25 @@ class ContentManager {
     }
 
     // Add main content with sentence markers
-    const mainContent = article.content;
     content += '<div class="reader-text">\n';
 
-    // Split content into text nodes while preserving HTML
-    const tempDiv = document.createElement('div');
-    tempDiv.innerHTML = mainContent;
+    // Create sentence spans directly from our sentences array
+    sentences.forEach((sentence, index) => {
+      content += `<span data-sentence-index="${index}">${sentence.text} </span>`;
+    });
 
-    let currentSentenceIndex = 0;
-    const processNode = (node: Node): string => {
-      if (node.nodeType === Node.TEXT_NODE) {
-        const text = node.textContent || '';
-        if (!text.trim()) return text;
-
-        // Find the corresponding sentence
-        const sentence = sentences[currentSentenceIndex];
-        if (sentence && text.includes(sentence.text)) {
-          currentSentenceIndex++;
-          return `<span data-sentence-index="${sentence.index}">${sentence.text} </span>`;
-        }
-        return text;
-      } else if (node.nodeType === Node.ELEMENT_NODE) {
-        const element = node as Element;
-        if (element.tagName === 'SCRIPT' || element.tagName === 'STYLE') {
-          return '';
-        }
-        const childContent: string = Array.from(node.childNodes)
-          .map(child => processNode(child))
-          .join('');
-        return `<${element.tagName.toLowerCase()}>${childContent}</${element.tagName.toLowerCase()}>`;
-      }
-      return '';
-    };
-
-    content += Array.from(tempDiv.childNodes).map(node => processNode(node)).join('');
     content += '</div>\n';
 
     return content;
   }
 
-  private async startReadingText(text: string, voice?: string, speed?: number) {
+  private async startReadingText(content: string | HTMLElement, voice?: string, speed?: number) {
     try {
-      console.log('Starting to read text:', { textLength: text.length, voice, speed });
+      console.log('Starting to read text:', {
+        contentType: typeof content === 'string' ? 'string' : 'HTMLElement',
+        voice,
+        speed
+      });
 
       // Get settings if not provided
       if (!voice || !speed) {
@@ -330,13 +286,12 @@ class ContentManager {
         this.currentSpeed = speed;
       }
 
-      // Only initialize sentences if they haven't been initialized yet
-      if (this.sentences.length === 0) {
-        this.sentences = this.splitIntoSentences(text);
-        console.log('Split text into sentences:', this.sentences.length);
-      } else {
-        console.log('Using existing sentences array:', this.sentences.length);
-      }
+      // Extract text content using shared processor
+      const textContent = TextProcessor.extractTextContent(content);
+
+      // Initialize sentences array using shared processor
+      this.sentences = TextProcessor.splitIntoSentences(textContent);
+      console.log('Split text into sentences:', this.sentences.length);
 
       this.currentSentenceIndex = 0;
       this.isPaused = false;
@@ -351,39 +306,129 @@ class ContentManager {
     }
   }
 
-  private splitIntoSentences(text: string): Sentence[] {
-    // Remove extra whitespace and normalize line endings
-    text = text.replace(/\s+/g, ' ')
-      .replace(/([.!?])\s+/g, '$1\n')
-      .trim();
+  private async readFromIndex(index: number) {
+    console.log('=== Read From Index Debug ===');
+    console.log('Requested index:', index);
 
-    // Split into sentences
-    const sentences = text.split(/\n+/);
+    if (this.sentences.length === 0) {
+      console.error('No sentences available to read from');
+      throw new Error('No sentences available to read from');
+    }
 
-    return sentences.map((text, index) => {
-      const trimmedText = text.trim();
-      return {
-        text: trimmedText,
-        index,
-        isHeading: this.isHeading(trimmedText)
-      };
-    }).filter(sentence => sentence.text.length > 0);
+    if (index >= this.sentences.length) {
+      console.error('Index out of bounds:', index, 'Total sentences:', this.sentences.length);
+      throw new Error('Index out of bounds');
+    }
+
+    // First, stop any current reading completely
+    await this.stopCurrentReading();
+
+    try {
+      // Initialize audio context if needed
+      if (!this.audioContext) {
+        this.audioContext = new AudioContext();
+      }
+      await this.audioContext.resume();
+
+      // Initialize TTS client if needed
+      if (!this.ttsClient) {
+        this.ttsClient = new EdgeTTSClient();
+      }
+
+      // Get current settings if not available
+      if (!this.currentVoice || !this.currentSpeed) {
+        const settings = await this.getSettings();
+        this.currentVoice = settings.voice;
+        this.currentSpeed = settings.speed;
+      }
+
+      // Update state
+      this.currentSentenceIndex = index;
+      this.isPlaying = true;
+      this.isPaused = false;
+
+      console.log('Starting to read from sentence:', {
+        index: this.currentSentenceIndex,
+        text: this.sentences[this.currentSentenceIndex].text
+      });
+
+      // Start reading from the new index
+      await this.readNextSentence(this.currentVoice, this.currentSpeed);
+    } catch (error) {
+      console.error('Failed to start reading from index:', error);
+      await this.stopCurrentReading();
+      throw error;
+    }
   }
 
-  private isHeading(text: string): boolean {
-    // Check if the text looks like a heading
-    return (
-      // All caps with no lowercase
-      /^[A-Z0-9\s.,!?-]+$/.test(text) ||
-      // Short phrase ending with colon
-      /^.{1,50}:$/.test(text) ||
-      // Numbered heading
-      /^\d+\.\s+.{1,50}$/.test(text)
-    );
+  private async stopCurrentReading(): Promise<void> {
+    console.log('Stopping current reading...');
+
+    // Stop any current audio playback
+    if (this.sourceNode) {
+      try {
+        this.sourceNode.stop();
+        this.sourceNode.disconnect();
+      } catch (e) {
+        console.error('Error stopping current audio:', e);
+      }
+      this.sourceNode = null;
+    }
+
+    // Clear current stream
+    if (this.currentStream) {
+      try {
+        if (typeof this.currentStream.removeListener === 'function') {
+          ['data', 'end', 'error'].forEach(event => {
+            try {
+              // @ts-ignore - Safe event removal
+              this.currentStream.removeListener(event);
+            } catch (e) {
+              console.error(`Error removing ${event} listener:`, e);
+            }
+          });
+        }
+      } catch (e) {
+        console.error('Error cleaning up stream:', e);
+      }
+      this.currentStream = null;
+    }
+
+    // Clear audio context
+    if (this.audioContext) {
+      try {
+        await this.audioContext.close();
+        this.audioContext = null;
+      } catch (e) {
+        console.error('Error closing audio context:', e);
+      }
+    }
+
+    // Clear TTS client
+    if (this.ttsClient) {
+      this.ttsClient.close();
+      this.ttsClient = null;
+    }
+
+    // Clear any pending audio
+    this.audioChunks = [];
+
+    // Reset state
+    this.isPlaying = false;
+    this.isPaused = false;
+
+    // Wait a small amount of time to ensure cleanup is complete
+    await new Promise(resolve => setTimeout(resolve, 100));
   }
 
   private async readNextSentence(voice: string, speed: number) {
     if (this.isPaused || !this.isPlaying || this.currentSentenceIndex >= this.sentences.length) {
+      console.log('ReadNextSentence early return:', {
+        isPaused: this.isPaused,
+        isPlaying: this.isPlaying,
+        currentIndex: this.currentSentenceIndex,
+        totalSentences: this.sentences.length
+      });
       if (this.currentSentenceIndex >= this.sentences.length) {
         this.stopReading(true);
       }
@@ -391,9 +436,20 @@ class ContentManager {
     }
 
     const sentence = this.sentences[this.currentSentenceIndex];
-    console.log('Reading sentence:', { index: this.currentSentenceIndex, text: sentence.text });
+    console.log('Reading sentence:', {
+      index: this.currentSentenceIndex,
+      text: sentence.text,
+      isHeading: sentence.isHeading
+    });
 
     try {
+      // Notify the reader about the current sentence
+      await chrome.runtime.sendMessage({
+        action: 'updateReaderHighlight',
+        index: this.currentSentenceIndex,
+        text: sentence.text
+      });
+
       // Read the sentence and wait for it to complete
       await this.readSentence(sentence.text, voice, speed);
 
@@ -463,7 +519,6 @@ class ContentManager {
 
         // Clear any existing audio chunks
         this.audioChunks = [];
-        this.isPlaying = true;
 
         // Collect all chunks before playing
         const allChunks: Uint8Array[] = [];
@@ -471,7 +526,6 @@ class ContentManager {
         console.log('Starting TTS stream for text:', text);
         const stream = this.ttsClient.toStream(text, options) as unknown as TTSStream;
         this.currentStream = stream;
-        console.log('Stream created:', stream);
 
         if (!stream || typeof stream.on !== 'function') {
           throw new Error('Invalid stream object');
@@ -484,7 +538,6 @@ class ContentManager {
             currentSentenceResolver();
             return;
           }
-          console.log('Received audio chunk:', chunk.length, 'bytes');
           allChunks.push(chunk);
         });
 
@@ -495,7 +548,6 @@ class ContentManager {
             return;
           }
 
-          console.log('Stream ended, total chunks:', allChunks.length);
           if (allChunks.length === 0) {
             console.error('Stream ended without receiving any data');
             reject(new Error('No audio data received'));
@@ -514,7 +566,6 @@ class ContentManager {
 
             // Create audio buffer
             const audioBuffer = await audioContext.decodeAudioData(combinedBuffer.buffer);
-            console.log('Audio buffer created:', { duration: audioBuffer.duration, channels: audioBuffer.numberOfChannels });
 
             if (this.isPaused) {
               cleanup();
@@ -532,14 +583,12 @@ class ContentManager {
 
             // When audio ends, resolve the promise
             sourceNode.onended = () => {
-              console.log('Audio finished playing');
               this.sourceNode = null;
               currentSentenceResolver();
             };
 
             // Start playing
             sourceNode.start();
-            console.log('Started playing audio');
 
           } catch (error) {
             console.error('Audio playback error:', error);
@@ -600,95 +649,6 @@ class ContentManager {
         }
       });
     });
-  }
-
-  private async readFromIndex(index: number) {
-    console.log('Reading from index:', index, 'Total sentences:', this.sentences.length);
-
-    if (this.sentences.length === 0) {
-      console.error('No sentences available to read from');
-      throw new Error('No sentences available to read from');
-    }
-
-    if (index >= this.sentences.length) {
-      console.error('Index out of bounds:', index, 'Total sentences:', this.sentences.length);
-      throw new Error('Index out of bounds');
-    }
-
-    console.log('Will start reading from sentence:', this.sentences[index]);
-
-    // Force stop any existing playback
-    if (this.sourceNode) {
-      try {
-        this.sourceNode.stop();
-        this.sourceNode.disconnect();
-      } catch (e) {
-        console.error('Error stopping existing playback:', e);
-      }
-      this.sourceNode = null;
-    }
-
-    // Clear audio context to force a fresh start
-    if (this.audioContext) {
-      await this.audioContext.close().catch(console.error);
-      this.audioContext = null;
-    }
-
-    // Clear TTS client to force a fresh start
-    if (this.ttsClient) {
-      this.ttsClient.close();
-      this.ttsClient = null;
-    }
-
-    // Clear any pending audio and streams
-    this.audioChunks = [];
-    if (this.currentStream) {
-      try {
-        if (typeof this.currentStream.removeListener === 'function') {
-          ['data', 'end', 'error'].forEach(event => {
-            try {
-              // @ts-ignore - Safe event removal
-              this.currentStream.removeListener(event);
-            } catch (e) {
-              console.error(`Error removing ${event} listener:`, e);
-            }
-          });
-        }
-      } catch (e) {
-        console.error('Error cleaning up stream:', e);
-      }
-      this.currentStream = null;
-    }
-
-    // Set up new state
-    this.currentSentenceIndex = index;
-    this.isPlaying = true;
-    this.isPaused = false;
-
-    // Get current settings if not available
-    if (!this.currentVoice || !this.currentSpeed) {
-      const settings = await this.getSettings();
-      this.currentVoice = settings.voice;
-      this.currentSpeed = settings.speed;
-    }
-
-    console.log('Starting to read from sentence:', this.sentences[index].text);
-
-    try {
-      // Create new audio context
-      this.audioContext = new AudioContext();
-      await this.audioContext.resume();
-
-      // Create new TTS client
-      this.ttsClient = new EdgeTTSClient();
-
-      // Start reading from the new index
-      await this.readNextSentence(this.currentVoice, this.currentSpeed);
-    } catch (error) {
-      console.error('Failed to start reading from index:', error);
-      this.stopReading(false, false);
-      throw error;
-    }
   }
 
   private stopReading(closeReader: boolean = false, keepState: boolean = false) {

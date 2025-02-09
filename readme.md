@@ -1,57 +1,68 @@
-# Microsoft Edge Read Aloud Extension for Chrome
+# Edge TTS Read Aloud Chrome Extension
 
-## What is this?
-Ever wished you could have Microsoft Edge's premium text-to-speech voices in Chrome? Well, now you can! This extension brings the natural, high-quality read aloud voices from Microsoft Edge to any Chromium browser, completely free of charge.
+A Chrome extension that provides high-quality text-to-speech using Microsoft Edge's TTS engine. This extension offers a clean reader view with synchronized text highlighting and precise sentence-level control.
 
 ## Features
-- **Premium Voice Selection**: Choose from a variety of natural-sounding voices offered by Microsoft Edge's text-to-speech service.
-- **Smart Text Detection**: Advanced algorithms to accurately detect and parse readable content, even in complex web layouts.
-- **Context Menu Integration**: Simply select any text and right-click to start reading - perfect for quick snippets!
-- **Customizable Experience**: Adjust playback speed to match your reading preferences.
-- **Cross-Browser Compatibility**: Works seamlessly across different Chromium browsers, including Arc browser where many other extensions fail.
 
-## Technical Challenges & Solutions
+- **High-Quality Text-to-Speech**: Uses Microsoft Edge's neural TTS engine for natural-sounding speech
+- **Interactive Reader View**:
+  - Clean, distraction-free reading interface
+  - Click on any sentence to start reading from that point
+  - Visual highlighting of the currently-read sentence
+  - Automatic scrolling to keep the current sentence in view
+- **Playback Controls**:
+  - Play/Pause/Stop functionality
+  - Resume from last position
+  - Start reading from any sentence by clicking
+- **Context Menu Integration**: Right-click on selected text to read it aloud
+- **Voice Customization**:
+  - Choose from multiple high-quality voices
+  - Adjust reading speed
+- **Synchronized Text Highlighting**: Visual feedback shows exactly which sentence is being read
 
-### Text Parsing
-One of the biggest challenges was accurately extracting readable content from web pages. We implemented multiple approaches:
+## Usage
 
-1. **Mozilla's Readability**: Leveraged the battle-tested Readability library for main article content extraction.
-2. **Custom TreeWalker**: Implemented a sophisticated DOM traversal system to handle dynamic content and complex layouts.
-3. **Smart Content Filtering**: Built-in filters to exclude irrelevant elements like scripts, styles, and hidden content.
+1. **Open Reader View**:
+   - Click the extension icon to open the current page in reader view
+   - The page will be cleaned up and formatted for optimal reading
 
-### Audio Streaming
-The extension uses a custom implementation of Microsoft Edge's TTS service:
-- Efficient audio chunk processing for smooth playback
-- Real-time audio streaming with minimal latency
-- Robust error handling and recovery mechanisms
+2. **Start Reading**:
+   - The extension will automatically start reading from the beginning
+   - Click any sentence to start reading from that point
+   - Use the control buttons to pause, resume, or stop reading
 
-### Browser Compatibility
-We tackled various browser-specific challenges:
-- Implemented custom content detection for Arc browser
-- Built a robust audio context management system
-- Designed a flexible message passing system between extension components
+3. **Read Selected Text**:
+   - Select any text on a webpage
+   - Right-click and choose "Read Selection" from the context menu
 
-## Future Improvements
-- Interactive text view with click-to-read functionality
-- Enhanced text parsing for complex layouts
-- Visual feedback for current reading position
-- Support for more text sources and formats
+4. **Customize Settings**:
+   - Click the extension icon to access settings
+   - Choose your preferred voice and reading speed
 
 ## Installation
-Due to Chrome Web Store's developer registration fee requirements, this extension is currently not available there. However, you can easily install it manually:
 
-1. Go to the [Releases](https://github.com/faisalbhuiyan3038/edge-tts-read-aloud-chrome-extension/releases) page
-2. Download the latest `.zip` file
-3. Extract the zip file to a folder on your computer
-4. Open Chrome and navigate to `chrome://extensions/`
-5. Enable "Developer mode" in the top right corner
-6. Click "Load unpacked" and select the folder where you extracted the zip
-7. The extension should now appear in your browser toolbar!
+1. Clone this repository
+2. Open Chrome and go to `chrome://extensions/`
+3. Enable "Developer mode"
+4. Click "Load unpacked" and select the extension directory
 
-Note: Since this is a developer mode installation, you might see a warning about using developer mode extensions. This is normal and you can safely keep the extension.
+## Technical Details
 
-## Credits
-This extension was built using [edge-tts-client](https://github.com/travisvn/edge-tts-client) by [@travisvn](https://github.com/travisvn). Their excellent work on the TTS client made this extension possible.
+- Uses Edge TTS Client for high-quality text-to-speech
+- Implements Mozilla's Readability for clean article extraction
+- Maintains synchronized state between content script and reader view
+- Processes text at sentence level for precise control
+- Uses shared text processing logic for consistent sentence splitting
+
+## Known Limitations
+
+- The reader view presents content in a simplified format, focusing on readability over exact visual reproduction
+- Some complex webpage layouts may be simplified in the reader view
 
 ## Contributing
-Found a bug or have a feature request? Feel free to open an issue or submit a pull request!
+
+Feel free to submit issues and pull requests for:
+- Bug fixes
+- New features
+- Documentation improvements
+- UI/UX enhancements
