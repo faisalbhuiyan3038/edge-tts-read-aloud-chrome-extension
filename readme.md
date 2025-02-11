@@ -24,7 +24,7 @@ A Chrome extension that provides high-quality text-to-speech using Microsoft Edg
 
 ![Edge TTS Reader Screenshot](demo/Edge-TTS-Reader.png)
 
-https://user-images.githubusercontent.com/faisalbhuiyan3038/edge-tts-read-aloud-chrome-extension/assets/demo/Edge-TTS-Demo.mp4
+<iframe width="560" height="315" src="https://www.youtube.com/embed/j8t5IHTXRNs?si=HW-ltK7AziqpmQ_W" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
 
 **Note:** The audio appears low quality in the demo due to OBS recording issues but it's fine in a real browser.
 
