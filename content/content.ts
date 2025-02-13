@@ -199,7 +199,7 @@ class ContentManager {
       }
 
       // Wait for the reader tab to fully initialize
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 250));
 
       // Start reading the text
       await this.startReadingText(textContent, voice, speed);
@@ -454,7 +454,7 @@ class ContentManager {
       await this.readSentence(sentence.text, voice, speed);
 
       // Add a small delay between sentences for better pacing
-      await new Promise(resolve => setTimeout(resolve, 250));
+      await new Promise(resolve => setTimeout(resolve, 0));
 
       // Check if we should continue after the sentence is finished
       if (!this.isPaused && this.isPlaying) {
